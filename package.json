@@ -1,0 +1,25 @@
+{
+  "name": "avsecapi",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "db:migrate": "node scripts/migrate.js",
+    "generate:api-key": "node scripts/generate-api-key.js",
+    "start": "node server.js",
+    "test": "node scripts/migrate.js && node --test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.0",
+    "jsonwebtoken": "^9.0.3",
+    "mysql2": "^3.22.6",
+    "uuid": "^14.0.1",
+    "zod": "^4.4.3"
+  }
+}
