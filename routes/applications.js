@@ -18,8 +18,9 @@ const toDateOnly = (value) => {
 
 const findApplication = async (executor, reference, lock = false) => {
   const [rows] = await executor.execute(
-    `SELECT a.*, v.first_name, v.last_name, v.identity_type, v.identity_number,
-            v.issuing_country, v.date_of_birth, v.gender, v.image_url
+    `SELECT a.*, v.first_name, v.last_name, v.other_names, v.identity_type, v.identity_number,
+            v.issuing_country, v.date_of_birth, v.gender, v.image_url,
+            CURDATE() BETWEEN a.visit_starts AND a.visit_ends AS within_visit_period
      FROM visitor_applications a
      INNER JOIN avsec_visitors v ON v.id = a.visitor_id
      WHERE a.id = ? OR a.application_number = ?
@@ -42,20 +43,23 @@ router.post(
 
       const [visitorResult] = await connection.execute(
         `INSERT INTO avsec_visitors
-         (first_name, last_name, identity_type, identity_number, issuing_country,
-          date_of_birth, company, company_position, image_url, gender, security_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+         (first_name, last_name, other_names, identity_type, identity_number, issuing_country,
+          date_of_birth, identity_expiry_date, company, company_position, image_url,
+          gender, security_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
          ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
         [
           body.first_name,
           body.last_name,
+          body.other_names,
           body.identity_type,
           body.identity_number,
           body.issuing_country,
           body.date_of_birth,
-          body.company,
-          body.company_position,
-          body.image_url,
+          body.identity_expiry_date,
+          body.company || null,
+          body.company_position || null,
+          body.image_url || body.supporting_documents.passport_photograph_url,
           body.gender
         ]
       );
@@ -90,22 +94,29 @@ router.post(
 
       await connection.execute(
         `INSERT INTO visitor_applications
-         (id, application_number, visitor_id, email, phone, company, company_position,
-          purpose, host_name, host_email, expected_arrival, expected_departure, source_key_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, application_number, visitor_id, personal_email, personal_phone,
+          alternative_personal_phone, identity_expiry_date, company_name, company_position,
+          company_address, company_phone, company_email, areas_of_access,
+          supporting_documents, visit_reasons, visit_starts, visit_ends, source_key_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           applicationId,
           applicationNumber,
           visitorId,
-          body.email,
-          body.phone,
-          body.company || null,
-          body.company_position || null,
-          body.purpose,
-          body.host_name,
-          body.host_email,
-          body.expected_arrival,
-          body.expected_departure,
+          body.personal_email,
+          body.personal_phone,
+          body.alternative_personal_phone,
+          body.identity_expiry_date,
+          body.company,
+          body.company_position,
+          body.company_address,
+          body.company_phone,
+          body.company_email,
+          JSON.stringify(body.areas_of_access),
+          JSON.stringify(body.supporting_documents),
+          JSON.stringify(body.visit_reasons),
+          body.visit_starts,
+          body.visit_ends,
           req.apiClient.keyFingerprint
         ]
       );
@@ -199,6 +210,10 @@ router.post(
       if (application.status !== 'APPROVED') {
         await connection.rollback();
         return res.status(409).json({ error: `Application cannot check in from ${application.status}.` });
+      }
+      if (!application.within_visit_period) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'The approved visit is outside its valid date range.' });
       }
 
       await connection.execute(

@@ -65,25 +65,50 @@ test('registration rejects caller-controlled roles', () => {
 test('public application validation normalizes identity and visit data', () => {
   const result = schemas.publicApplication.safeParse({
     body: {
-      first_name: 'Visitor',
-      last_name: 'Applicant',
-      identity_type: 'NIN',
-      identity_number: 'cm1234567890',
-      date_of_birth: '1990-01-01',
-      email: 'VISITOR@EXAMPLE.COM',
-      phone: '+256 700 000000',
-      purpose: 'Security briefing',
-      host_name: 'Host Name',
-      host_email: 'HOST@EXAMPLE.COM',
-      expected_arrival: '2026-07-22T12:00:00+03:00',
-      expected_departure: '2026-07-22T14:00:00+03:00'
+      personal_data: {
+        identity_expiry_date: '19-01-2035',
+        first_name: 'Lyadda',
+        last_name: 'Jonathan',
+        other_names: 'Gift',
+        identity_type: 'National ID',
+        identity_number: 'cm203601en7tl',
+        issuing_country: 'Uganda',
+        date_of_birth: '08-08-2002',
+        personal_phone: '+256701405780',
+        alternative_personal_phone: '+256766099107',
+        personal_email: 'JONALYADDA@GMAIL.COM',
+        gender: 'true'
+      },
+      company_details: {
+        company_name: 'Kalman Solutions Limited',
+        company_position: 'IT Technician',
+        company_address: 'Entebbe, Uganda',
+        company_phone: '+256700111222',
+        company_email: 'operations@kalmansolutions.com'
+      },
+      visit_data: {
+        visit_reason: ['CCTV installation and maintenance', 'LAN installation'],
+        areas_of_access: ['Terminal', 'Vip', 'Airside', ''],
+        visit_starts: '20-07-2026',
+        visit_ends: '29-08-2026'
+      },
+      supporting_documents: {
+        identity_document_url: 'https://files.example.com/id.pdf',
+        avsec_endorsed_letter_url: 'https://files.example.com/endorsement.pdf',
+        passport_photograph_url: 'https://files.example.com/photo.jpg',
+        other_document_urls: ['https://files.example.com/additional.pdf']
+      }
     }
   });
 
   assert.equal(result.success, true);
-  assert.equal(result.data.body.identity_number, 'CM1234567890');
-  assert.equal(result.data.body.email, 'visitor@example.com');
-  assert.equal(result.data.body.expected_arrival instanceof Date, true);
+  assert.equal(result.data.body.identity_number, 'CM203601EN7TL');
+  assert.equal(result.data.body.identity_type, 'NATIONAL_ID');
+  assert.equal(result.data.body.issuing_country, 'UGANDA');
+  assert.equal(result.data.body.date_of_birth, '2002-08-08');
+  assert.equal(result.data.body.personal_email, 'jonalyadda@gmail.com');
+  assert.equal(result.data.body.gender, true);
+  assert.deepEqual(result.data.body.areas_of_access, ['Terminal', 'Vip', 'Airside']);
 });
 
 test('login rate limiter blocks repeated invalid requests', async () => {
@@ -155,19 +180,38 @@ test('visitor application completes approval, check-in and check-out', async () 
     externalApiKeyId = createdKey.apiKey.id;
 
     const applicationBody = {
-      first_name: 'Lifecycle',
-      last_name: 'Visitor',
-      identity_type: 'NIN',
-      identity_number: identityNumber,
-      issuing_country: 'UG',
-      date_of_birth: '1990-01-01',
-      email: 'lifecycle@example.test',
-      phone: '+256700000000',
-      purpose: 'Automated lifecycle verification',
-      host_name: 'Test Host',
-      host_email: 'host@example.test',
-      expected_arrival: '2026-07-22T09:00:00+03:00',
-      expected_departure: '2026-07-22T12:00:00+03:00'
+      personal_data: {
+        identity_expiry_date: '01-01-2035',
+        first_name: 'Lifecycle',
+        last_name: 'Visitor',
+        identity_type: 'National ID',
+        identity_number: identityNumber,
+        issuing_country: 'Uganda',
+        date_of_birth: '01-01-1990',
+        personal_phone: '+256700000000',
+        alternative_personal_phone: '+256700000002',
+        personal_email: 'lifecycle@example.test',
+        gender: 'false'
+      },
+      company_details: {
+        company_name: 'Lifecycle Aviation Ltd',
+        company_position: 'Test Engineer',
+        company_address: 'Airport Road, Entebbe',
+        company_phone: '+256700000001',
+        company_email: 'company@example.test'
+      },
+      visit_data: {
+        visit_reason: ['Automated lifecycle verification'],
+        areas_of_access: ['Main Terminal', 'Operations Office'],
+        visit_starts: '22-07-2026',
+        visit_ends: '29-08-2026'
+      },
+      supporting_documents: {
+        identity_document_url: 'https://files.example.test/identity.pdf',
+        avsec_endorsed_letter_url: 'https://files.example.test/endorsement.pdf',
+        passport_photograph_url: 'https://files.example.test/photo.jpg',
+        other_document_urls: ['https://files.example.test/supporting.pdf']
+      }
     };
 
     const missingKey = await fetch(`${baseUrl}/public/visitor-applications`, {
@@ -223,7 +267,19 @@ test('visitor application completes approval, check-in and check-out', async () 
       headers: { authorization: `Bearer ${assistantSession.token}` }
     });
     assert.equal(details.status, 200);
-    assert.equal((await details.json()).application.status, 'CHECKED_OUT');
+    const applicationDetails = (await details.json()).application;
+    const storedAreas = typeof applicationDetails.areas_of_access === 'string'
+      ? JSON.parse(applicationDetails.areas_of_access)
+      : applicationDetails.areas_of_access;
+    const storedDocuments = typeof applicationDetails.supporting_documents === 'string'
+      ? JSON.parse(applicationDetails.supporting_documents)
+      : applicationDetails.supporting_documents;
+    assert.equal(applicationDetails.status, 'CHECKED_OUT');
+    assert.deepEqual(storedAreas, ['Main Terminal', 'Operations Office']);
+    assert.equal(
+      storedDocuments.avsec_endorsed_letter_url,
+      'https://files.example.test/endorsement.pdf'
+    );
 
     const revoked = await fetch(`${baseUrl}/external-api-keys/${externalApiKeyId}`, {
       method: 'DELETE',
