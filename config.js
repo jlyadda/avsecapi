@@ -14,6 +14,11 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32),
   JWT_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(18000),
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+  CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:5173'),
+  GMAIL_USER: z.string().trim().default(''),
+  GMAIL_APP_PASSWORD: z.string().trim().default(''),
+  EMAIL_FROM_NAME: z.string().trim().min(1).max(100).default('AVSEC'),
+  PASSWORD_RESET_OTP_TTL_MINUTES: z.coerce.number().int().min(5).max(30).default(10),
   PUBLIC_APP_API_KEYS: z.string().default('').refine(
     (value) => value === '' || value.split(',').every((key) => key.trim().length >= 32),
     'Every public application API key must contain at least 32 characters.'
@@ -29,6 +34,10 @@ if (!result.success) {
 
 module.exports = {
   ...result.data,
+  CORS_ALLOWED_ORIGINS: result.data.CORS_ALLOWED_ORIGINS
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/$/, ''))
+    .filter(Boolean),
   PUBLIC_APP_API_KEYS: result.data.PUBLIC_APP_API_KEYS
     .split(',')
     .map((key) => key.trim())

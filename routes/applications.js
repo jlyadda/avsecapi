@@ -5,6 +5,7 @@ const { authenticateToken, authenticateApiKey, authorizePermission } = require('
 const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
+const { applicationSelect, findApplication } = require('./applicationHelpers');
 
 const router = express.Router();
 
@@ -16,20 +17,7 @@ const toDateOnly = (value) => {
   return `${year}-${month}-${day}`;
 };
 
-const findApplication = async (executor, reference, lock = false) => {
-  const [rows] = await executor.execute(
-    `SELECT a.*, v.first_name, v.last_name, v.other_names, v.identity_type, v.identity_number,
-            v.issuing_country, v.date_of_birth, v.gender, v.image_url,
-            CURDATE() BETWEEN a.visit_starts AND a.visit_ends AS within_visit_period
-     FROM visitor_applications a
-     INNER JOIN avsec_visitors v ON v.id = a.visitor_id
-     WHERE a.id = ? OR a.application_number = ?
-     LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
-    [reference, reference]
-  );
-  return rows[0];
-};
-
+//external app route for visitor application submition
 router.post(
   '/public/visitor-applications',
   authenticateApiKey('VISITOR_APPLICATION'),
@@ -126,8 +114,183 @@ router.post(
         applicationId,
         applicationNumber,
         status: 'SUBMITTED',
-        message: 'Visitor application submitted for review.'
+        message: `Success, visitor application submitted for review.`
       });
+    } catch (error) {
+      await connection.rollback();
+      if (error.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ error: 'A matching application already exists, please wait for security review proccess.' });
+      }
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error(error);
+      return res.status(500).json({ error: 'Unable to submit visitor application, please try again later.' });
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+router.get(
+  '/visitor-applications',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.VIEW_APPLICATIONS),
+  validate(schemas.applicationList),
+  async (req, res) => {
+    try {
+      const { search, status, visit_from, visit_to, page, page_size } = req.validatedQuery;
+      const conditions = [];
+      const parameters = [];
+
+      if (search) {
+        const searchValue = `%${search}%`;
+        conditions.push(`(
+          a.application_number LIKE ? OR v.first_name LIKE ? OR v.last_name LIKE ?
+          OR v.other_names LIKE ? OR v.identity_number LIKE ? OR a.company_name LIKE ?
+        )`);
+        parameters.push(...Array(6).fill(searchValue));
+      }
+      if (status) {
+        conditions.push('a.status = ?');
+        parameters.push(status);
+      }
+      if (visit_from) {
+        conditions.push('a.visit_ends >= ?');
+        parameters.push(visit_from);
+      }
+      if (visit_to) {
+        conditions.push('a.visit_starts <= ?');
+        parameters.push(visit_to);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [countRows] = await db.execute(
+        `SELECT COUNT(*) AS total
+         FROM visitor_applications a
+         INNER JOIN avsec_visitors v ON v.id = a.visitor_id
+         ${whereClause}`,
+        parameters
+      );
+      const total = Number(countRows[0].total);
+      const offset = (page - 1) * page_size;
+      const [applications] = await db.execute(
+        `${applicationSelect}
+         ${whereClause}
+         ORDER BY a.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...parameters, page_size, offset]
+      );
+
+      return res.json({
+        applications,
+        pagination: {
+          page,
+          page_size,
+          total,
+          total_pages: Math.ceil(total / page_size)
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: 'Unable to list visitor applications.' });
+    }
+  }
+);
+
+router.post(
+  '/visitor-applications',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.CREATE_APPLICATIONS),
+  validate(schemas.internalApplication),
+  async (req, res) => {
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const body = req.body;
+      const documents = body.supporting_documents || {};
+      const imageUrl = body.image_url || documents.passport_photograph_url || null;
+
+      const [visitorResult] = await connection.execute(
+        `INSERT INTO avsec_visitors
+         (first_name, last_name, other_names, identity_type, identity_number, issuing_country,
+          date_of_birth, identity_expiry_date, company, company_position, image_url,
+          gender, security_status, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
+         ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+        [
+          body.first_name,
+          body.last_name,
+          body.other_names || null,
+          body.identity_type,
+          body.identity_number,
+          body.issuing_country,
+          body.date_of_birth,
+          body.identity_expiry_date || null,
+          body.company_name,
+          body.company_position || null,
+          imageUrl,
+          body.gender,
+          req.user.id
+        ]
+      );
+
+      const visitorId = visitorResult.insertId;
+      const [visitorRows] = await connection.execute(
+        `SELECT first_name, last_name, date_of_birth, security_status
+         FROM avsec_visitors WHERE id = ? FOR UPDATE`,
+        [visitorId]
+      );
+      const visitor = visitorRows[0];
+
+      if (
+        visitor.first_name.toLowerCase() !== body.first_name.toLowerCase()
+        || visitor.last_name.toLowerCase() !== body.last_name.toLowerCase()
+        || toDateOnly(visitor.date_of_birth) !== body.date_of_birth
+      ) {
+        const mismatchError = new Error('Identity details do not match the existing visitor record.');
+        mismatchError.status = 409;
+        throw mismatchError;
+      }
+      if (visitor.security_status !== 'ACTIVE') {
+        const blockedError = new Error('This visitor cannot submit an application.');
+        blockedError.status = 403;
+        throw blockedError;
+      }
+
+      const applicationId = uuidv4();
+      const datePart = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+      const applicationNumber = `AVSEC-${datePart}-${applicationId.slice(0, 8).toUpperCase()}`;
+
+      await connection.execute(
+        `INSERT INTO visitor_applications
+         (id, application_number, visitor_id, personal_email, personal_phone,
+          alternative_personal_phone, identity_expiry_date, company_name, company_position,
+          company_address, company_phone, company_email, areas_of_access,
+          supporting_documents, visit_reasons, visit_starts, visit_ends, source_key_hash, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTERNAL_STAFF', 'SUBMITTED')`,
+        [
+          applicationId,
+          applicationNumber,
+          visitorId,
+          body.personal_email,
+          body.personal_phone,
+          body.alternative_personal_phone || null,
+          body.identity_expiry_date || null,
+          body.company_name,
+          body.company_position || null,
+          body.company_address || null,
+          body.company_phone || null,
+          body.company_email || null,
+          JSON.stringify(body.areas_of_access || []),
+          JSON.stringify(documents),
+          JSON.stringify(body.visit_reasons),
+          body.visit_starts,
+          body.visit_ends
+        ]
+      );
+
+      await connection.commit();
+      const application = await findApplication(db, applicationId);
+      return res.status(201).json({ application });
     } catch (error) {
       await connection.rollback();
       if (error.code === 'ER_DUP_ENTRY') {
@@ -135,13 +298,14 @@ router.post(
       }
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error(error);
-      return res.status(500).json({ error: 'Unable to submit visitor application.' });
+      return res.status(500).json({ error: 'Unable to create visitor application.' });
     } finally {
       connection.release();
     }
   }
 );
 
+//
 router.get(
   '/visitor-applications/:reference',
   authenticateToken,
@@ -159,6 +323,8 @@ router.get(
   }
 );
 
+
+//
 router.patch(
   '/visitor-applications/:reference/decision',
   authenticateToken,
@@ -193,6 +359,8 @@ router.patch(
   }
 );
 
+
+//
 router.post(
   '/visitor-applications/:reference/check-in',
   authenticateToken,
@@ -238,6 +406,8 @@ router.post(
   }
 );
 
+
+//
 router.post(
   '/visitor-applications/:reference/check-out',
   authenticateToken,
@@ -255,6 +425,17 @@ router.post(
       if (application.status !== 'CHECKED_IN') {
         await connection.rollback();
         return res.status(409).json({ error: `Application cannot check out from ${application.status}.` });
+      }
+
+      const [activeAssignments] = await connection.execute(
+        `SELECT id FROM card_assignments
+         WHERE application_id = ? AND status = 'ACTIVE'
+         LIMIT 1 FOR UPDATE`,
+        [application.id]
+      );
+      if (activeAssignments.length > 0) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'Return the assigned access card before check-out.' });
       }
 
       await connection.execute(

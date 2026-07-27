@@ -10,6 +10,27 @@ const { loginLimiter, registerLimiter } = require('../rateLimits');
 
 const router = express.Router();
 
+const issueToken = async (executor, userId) => {
+  const jti = uuidv4();
+  const expiresAt = new Date(Date.now() + config.JWT_TTL_SECONDS * 1000);
+  const token = jwt.sign(
+    { id: userId },
+    config.JWT_SECRET,
+    {
+      algorithm: 'HS256',
+      audience: 'avsec-clients',
+      issuer: 'avsecapi',
+      jwtid: jti,
+      expiresIn: config.JWT_TTL_SECONDS
+    }
+  );
+  await executor.execute(
+    'INSERT INTO auth_tokens (jti, user_id, expires_at) VALUES (?, ?, ?)',
+    [jti, userId, expiresAt]
+  );
+  return { token, jti, expiresAt };
+};
+
 router.post('/register', registerLimiter, validate(schemas.register), async (req, res) => {
   const { user_name, email, password, full_name, department } = req.body;
 
@@ -48,7 +69,7 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
 
   try {
     const [users] = await db.execute(
-      `SELECT id, user_name, email, password_hash, department, user_role, is_active
+      `SELECT id, user_name, email, password_hash, full_name, department, user_role, is_active
        FROM user_profiles WHERE email = ? OR user_name = ?`,
       [identifier.toLowerCase(), identifier]
     );
@@ -61,24 +82,7 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
       return res.status(403).json({ error: 'This account is awaiting approval or has been deactivated.' });
     }
 
-    const jti = uuidv4();
-    const expiresAt = new Date(Date.now() + config.JWT_TTL_SECONDS * 1000);
-    const token = jwt.sign(
-      { id: user.id },
-      config.JWT_SECRET,
-      {
-        algorithm: 'HS256',
-        audience: 'avsec-clients',
-        issuer: 'avsecapi',
-        jwtid: jti,
-        expiresIn: config.JWT_TTL_SECONDS
-      }
-    );
-
-    await db.execute(
-      'INSERT INTO auth_tokens (jti, user_id, expires_at) VALUES (?, ?, ?)',
-      [jti, user.id, expiresAt]
-    );
+    const { token, expiresAt } = await issueToken(db, user.id);
     await db.execute('UPDATE user_profiles SET last_login = NOW() WHERE id = ?', [user.id]);
 
     return res.json({
@@ -88,12 +92,40 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
         id: user.id,
         user_name: user.user_name,
         email: user.email,
+        full_name: user.full_name,
+        department: user.department,
         role: user.user_role
-      }
+      },
+      expires_at: expiresAt
     });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Database error during login.' });
+  }
+});
+
+router.post('/auth/refresh', authenticateToken, async (req, res) => {
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [result] = await connection.execute(
+      `UPDATE auth_tokens SET revoked_at = NOW()
+       WHERE jti = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > NOW()`,
+      [req.user.jti, req.user.id]
+    );
+    if (result.affectedRows !== 1) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Session has already been refreshed or revoked.' });
+    }
+    const { token, expiresAt } = await issueToken(connection, req.user.id);
+    await connection.commit();
+    return res.json({ token, expires_at: expiresAt });
+  } catch (error) {
+    await connection.rollback();
+    console.error(error);
+    return res.status(500).json({ error: 'Unable to refresh session.' });
+  } finally {
+    connection.release();
   }
 });
 

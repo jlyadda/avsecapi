@@ -4,6 +4,8 @@ const { ROLES } = require('./permissions');
 const email = z.string().trim().toLowerCase().email().max(255);
 const uuid = z.uuid();
 const applicationReference = z.string().trim().min(1).max(40).regex(/^[A-Za-z0-9-]+$/);
+const isoDate = z.iso.date();
+const phone = z.string().trim().min(7).max(30).regex(/^[+0-9().\-\s]+$/);
 const httpsUrl = z.url().max(2048).refine(
   (value) => value.startsWith('https://'),
   'Document URL must use HTTPS.'
@@ -174,11 +176,186 @@ const applicationCheckOutSchema = z.object({
   body: z.object({}).strict()
 });
 
+const applicationStatus = z.enum([
+  'SUBMITTED',
+  'APPROVED',
+  'REJECTED',
+  'CHECKED_IN',
+  'CHECKED_OUT',
+  'CANCELLED'
+]);
+
+const paginationQuery = {
+  page: z.coerce.number().int().min(1).default(1),
+  page_size: z.coerce.number().int().min(1).max(100).default(50)
+};
+
+const applicationListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    status: applicationStatus.optional(),
+    visit_from: isoDate.optional(),
+    visit_to: isoDate.optional(),
+    ...paginationQuery
+  }).strict().refine(
+    (query) => !query.visit_from || !query.visit_to || query.visit_to >= query.visit_from,
+    { path: ['visit_to'], message: 'Visit end filter must not be before the start filter.' }
+  )
+});
+
+const internalSupportingDocuments = supportingDocuments.partial().extend({
+  other_document_urls: z.array(httpsUrl).max(10).default([])
+}).strict();
+
+const internalApplicationBody = z.object({
+  first_name: z.string().trim().min(2).max(255),
+  last_name: z.string().trim().min(2).max(255),
+  other_names: z.string().trim().max(255).optional(),
+  date_of_birth: isoDate,
+  gender: z.union([z.boolean(), z.literal(0), z.literal(1)]).transform(Boolean),
+  identity_type: z.enum(['PASSPORT', 'NATIONAL_ID', 'DRIVERS_LICENSE']),
+  identity_number: z.string().trim().toUpperCase().min(6).max(100).regex(/^[A-Z0-9/-]+$/),
+  issuing_country: issuingCountry.default('UGANDA'),
+  identity_expiry_date: isoDate.optional(),
+  personal_phone: phone,
+  alternative_personal_phone: phone.optional(),
+  personal_email: email,
+  company_name: z.string().trim().min(2).max(255),
+  company_position: z.string().trim().min(2).max(255).optional(),
+  company_address: z.string().trim().min(3).max(500).optional(),
+  company_phone: phone.optional(),
+  company_email: email.optional(),
+  image_url: httpsUrl.optional(),
+  visit_reasons: stringList,
+  areas_of_access: stringList.optional(),
+  visit_starts: isoDate,
+  visit_ends: isoDate,
+  supporting_documents: internalSupportingDocuments.optional()
+}).strict().superRefine((body, context) => {
+  const today = new Date().toISOString().slice(0, 10);
+  if (body.visit_ends < body.visit_starts) {
+    context.addIssue({
+      code: 'custom',
+      path: ['visit_ends'],
+      message: 'Visit end date must not be before its start date.'
+    });
+  }
+  if (body.date_of_birth >= today) {
+    context.addIssue({
+      code: 'custom',
+      path: ['date_of_birth'],
+      message: 'Date of birth must be in the past.'
+    });
+  }
+  if (body.identity_expiry_date && body.identity_expiry_date <= today) {
+    context.addIssue({
+      code: 'custom',
+      path: ['identity_expiry_date'],
+      message: 'Identity document must not be expired.'
+    });
+  }
+  if (body.issuing_country !== 'UGANDA' && body.identity_type !== 'PASSPORT') {
+    context.addIssue({
+      code: 'custom',
+      path: ['identity_type'],
+      message: 'Non-Ugandan applicants must use a passport.'
+    });
+  }
+});
+
+const internalApplicationSchema = z.object({ body: internalApplicationBody });
+
+const userListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    role: z.enum(ROLES).optional(),
+    is_active: z.enum(['true', 'false', '1', '0']).transform(
+      (value) => value === 'true' || value === '1'
+    ).optional(),
+    ...paginationQuery
+  }).strict()
+});
+
+const cardAccessLevel = z.enum(['LEVEL_1', 'LEVEL_2', 'LEVEL_3', 'LEVEL_4', 'ALL']);
+const cardCategory = z.enum(['VISITOR', 'STAFF', 'CONTRACTOR', 'ONE_DAY_DUTY', 'PUBLIC_AREAS']);
+
+const cardListSchema = z.object({
+  query: z.object({
+    access_level: cardAccessLevel.optional(),
+    category: cardCategory.optional(),
+    status: z.enum(['AVAILABLE', 'ASSIGNED', 'DAMAGED', 'LOST', 'UNAVAILABLE']).optional(),
+    search: z.string().trim().max(100).default('')
+  }).strict()
+});
+
+const cardCreateSchema = z.object({
+  body: z.object({
+    number: z.string().trim().toUpperCase().min(2).max(100).regex(/^[A-Z0-9/_-]+$/),
+    access_level: cardAccessLevel,
+    category: cardCategory.default('VISITOR')
+  }).strict()
+});
+
+const cardIdSchema = z.object({
+  params: z.object({ id: uuid })
+});
+
+const cardConditionSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    status: z.enum(['AVAILABLE', 'UNAVAILABLE', 'DAMAGED', 'LOST'])
+  }).strict()
+});
+
+const cardAssignmentSchema = z.object({
+  params: z.object({ reference: applicationReference }),
+  body: z.object({
+    card_number: z.string().trim().toUpperCase().min(2).max(100).regex(/^[A-Z0-9/_-]+$/)
+  }).strict()
+});
+
+const cardReturnSchema = z.object({
+  params: z.object({ reference: applicationReference }),
+  body: z.object({}).strict()
+});
+
+const accountUpdateSchema = z.object({
+  body: z.object({
+    full_name: z.string().trim().min(2).max(255).optional(),
+    email: email.optional()
+  }).strict().refine(
+    (body) => body.full_name !== undefined || body.email !== undefined,
+    'At least one profile field is required.'
+  )
+});
+
+const passwordChangeSchema = z.object({
+  body: z.object({
+    current_password: z.string().min(1).max(128),
+    new_password: z.string().min(12).max(128)
+  }).strict().refine(
+    (body) => body.current_password !== body.new_password,
+    { path: ['new_password'], message: 'New password must differ from the current password.' }
+  )
+});
+
+const passwordResetRequestSchema = z.object({
+  body: z.object({ email }).strict()
+});
+
+const passwordResetConfirmSchema = z.object({
+  body: z.object({
+    email,
+    otp: z.string().trim().regex(/^\d{5}$/, 'OTP must contain exactly 5 digits.'),
+    new_password: z.string().min(12).max(128)
+  }).strict()
+});
+
 const externalApiKeyCreateSchema = z.object({
   body: z.object({
     name: z.string().trim().min(3).max(100),
     purpose: z.string().trim().min(10).max(500),
-    role: z.enum(['VISITOR_APPLICATION']),
+    role: z.enum(['VISITOR_APPLICATION', 'VEHICLE_ACCESS_APPLICATION']),
     expires_at: z.iso.datetime({ offset: true }).transform((value) => new Date(value)).optional()
   }).strict().refine(
     (body) => !body.expires_at || body.expires_at > new Date(),
@@ -188,6 +365,24 @@ const externalApiKeyCreateSchema = z.object({
 
 const externalApiKeyIdSchema = z.object({
   params: z.object({ id: uuid })
+});
+
+const vehicleAccessApplicationSchema = z.object({
+  body: z.object({
+    driver_name: z.string().trim().min(3).max(255),
+    driver_national_id_number: z.string().trim().toUpperCase()
+      .min(6).max(100).regex(/^[A-Z0-9/-]+$/),
+    vehicle_registration_number: z.string().trim().toUpperCase()
+      .min(3).max(30).regex(/^[A-Z0-9 -]+$/),
+    vehicle_type: z.string().trim().min(2).max(100),
+    company: z.string().trim().min(2).max(255),
+    reason_for_access: z.string().trim().min(5).max(2000),
+    access_gate: z.string().trim().min(2).max(100),
+    date_of_access: portalDate,
+    time_of_access: z.string().trim()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Time must use 24-hour HH:mm format.'),
+    duration_of_access_hours: z.number().int().min(1).max(168)
+  }).strict()
 });
 
 const userStatusSchema = z.object({
@@ -219,7 +414,7 @@ const validate = (schema) => (req, res, next) => {
 
   if (result.data.body) req.body = result.data.body;
   if (result.data.params) req.params = result.data.params;
-  if (result.data.query) req.query = result.data.query;
+  if (result.data.query) req.validatedQuery = result.data.query;
   return next();
 };
 
@@ -234,10 +429,24 @@ module.exports = {
     applicationDecision: applicationDecisionSchema,
     applicationCheckIn: applicationCheckInSchema,
     applicationCheckOut: applicationCheckOutSchema,
+    applicationList: applicationListSchema,
+    internalApplication: internalApplicationSchema,
     externalApiKeyCreate: externalApiKeyCreateSchema,
     externalApiKeyId: externalApiKeyIdSchema,
+    vehicleAccessApplication: vehicleAccessApplicationSchema,
     userStatus: userStatusSchema,
     userRole: userRoleSchema,
-    userId: userIdSchema
+    userId: userIdSchema,
+    userList: userListSchema,
+    cardList: cardListSchema,
+    cardCreate: cardCreateSchema,
+    cardId: cardIdSchema,
+    cardCondition: cardConditionSchema,
+    cardAssignment: cardAssignmentSchema,
+    cardReturn: cardReturnSchema,
+    accountUpdate: accountUpdateSchema,
+    passwordChange: passwordChangeSchema,
+    passwordResetRequest: passwordResetRequestSchema,
+    passwordResetConfirm: passwordResetConfirmSchema
   }
 };

@@ -14,6 +14,66 @@ const findUser = async (id) => {
   return rows[0];
 };
 
+router.get(
+  '/users',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.MANAGE_USERS),
+  validate(schemas.userList),
+  async (req, res) => {
+    try {
+      const { search, role, is_active, page, page_size } = req.validatedQuery;
+      const conditions = [];
+      const parameters = [];
+
+      if (search) {
+        const searchValue = `%${search}%`;
+        conditions.push(
+          '(user_name LIKE ? OR email LIKE ? OR full_name LIKE ? OR department LIKE ?)'
+        );
+        parameters.push(...Array(4).fill(searchValue));
+      }
+      if (role) {
+        conditions.push('user_role = ?');
+        parameters.push(role);
+      }
+      if (is_active !== undefined) {
+        conditions.push('is_active = ?');
+        parameters.push(is_active);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [countRows] = await db.execute(
+        `SELECT COUNT(*) AS total FROM user_profiles ${whereClause}`,
+        parameters
+      );
+      const total = Number(countRows[0].total);
+      const offset = (page - 1) * page_size;
+      const [users] = await db.execute(
+        `SELECT id, user_name, email, full_name, department, user_role AS role, is_active,
+                last_login, created_at
+         FROM user_profiles
+         ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...parameters, page_size, offset]
+      );
+
+      return res.json({
+        users: users.map((user) => ({ ...user, is_active: Boolean(user.is_active) })),
+        pagination: {
+          page,
+          page_size,
+          total,
+          total_pages: Math.ceil(total / page_size)
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: 'Unable to list staff users.' });
+    }
+  }
+);
+
 router.patch(
   '/users/:id/status',
   authenticateToken,

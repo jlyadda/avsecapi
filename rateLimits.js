@@ -31,4 +31,25 @@ const publicApplicationLimiter = rateLimit({
   message: { error: 'Too many visitor applications. Please try again later.' }
 });
 
-module.exports = { apiLimiter, loginLimiter, registerLimiter, publicApplicationLimiter };
+const passwordResetRequestLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 15 * 60 * 1000,
+  limit: 3,
+  message: { error: 'Too many password reset requests. Please try again later.' }
+});
+
+const passwordResetConfirmLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  message: { error: 'Too many reset attempts. Please try again later.' }
+});
+
+module.exports = {
+  apiLimiter,
+  loginLimiter,
+  registerLimiter,
+  publicApplicationLimiter,
+  passwordResetRequestLimiter,
+  passwordResetConfirmLimiter
+};

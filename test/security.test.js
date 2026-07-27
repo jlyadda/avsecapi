@@ -18,6 +18,14 @@ const listen = async () => {
 
 const close = (server) => new Promise((resolve) => server.close(resolve));
 
+const addDays = (date, days) => new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+
+const toPortalDate = (date) => {
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  return `${day}-${month}-${date.getUTCFullYear()}`;
+};
+
 const createSessionToken = async (userId) => {
   const jti = uuidv4();
   await db.execute(
@@ -36,13 +44,17 @@ const createSessionToken = async (userId) => {
 
 test('role permissions enforce application boundaries', () => {
   assert.equal(hasPermission('security_assistant', PERMISSIONS.VIEW_APPLICATIONS), true);
+  assert.equal(hasPermission('security_assistant', PERMISSIONS.CREATE_APPLICATIONS), true);
   assert.equal(hasPermission('security_assistant', PERMISSIONS.CHECK_IN_OUT), true);
+  assert.equal(hasPermission('security_assistant', PERMISSIONS.ASSIGN_CARDS), true);
+  assert.equal(hasPermission('security_assistant', PERMISSIONS.MANAGE_CARD_INVENTORY), false);
   assert.equal(hasPermission('security_assistant', PERMISSIONS.REVIEW_APPLICATIONS), false);
   assert.equal(hasPermission('security_assistant', PERMISSIONS.MANAGE_API_KEYS), false);
   assert.equal(hasPermission('supervisor', PERMISSIONS.REVIEW_APPLICATIONS), true);
   assert.equal(hasPermission('supervisor', PERMISSIONS.MANAGE_API_KEYS), false);
   assert.equal(hasPermission('admin', PERMISSIONS.MANAGE_USERS), true);
   assert.equal(hasPermission('admin', PERMISSIONS.MANAGE_API_KEYS), true);
+  assert.equal(hasPermission('admin', PERMISSIONS.MANAGE_CARD_INVENTORY), true);
   assert.equal(hasPermission('admin', PERMISSIONS.MANAGE_ROLES), false);
   assert.equal(hasPermission('super_admin', PERMISSIONS.MANAGE_ROLES), true);
   assert.equal(canManageRole('admin', 'security_assistant'), true);
@@ -143,6 +155,8 @@ test('visitor application completes approval, check-in and check-out', async () 
   const sessionIds = [];
   let applicationId;
   let externalApiKeyId;
+  let vehicleApiKeyId;
+  let vehicleApplicationId;
 
   try {
     await db.execute(
@@ -178,6 +192,26 @@ test('visitor application completes approval, check-in and check-out', async () 
     assert.equal(createdKeyResponse.status, 201);
     const createdKey = await createdKeyResponse.json();
     externalApiKeyId = createdKey.apiKey.id;
+    const vehicleKeyResponse = await fetch(`${baseUrl}/external-api-keys`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${reviewerSession.token}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: 'Lifecycle vehicle application client',
+        purpose: 'Submit temporary vehicle permits during automated lifecycle testing.',
+        role: 'VEHICLE_ACCESS_APPLICATION'
+      })
+    });
+    assert.equal(vehicleKeyResponse.status, 201);
+    const vehicleKey = await vehicleKeyResponse.json();
+    vehicleApiKeyId = vehicleKey.apiKey.id;
+
+    const now = new Date();
+    const visitStarts = toPortalDate(now);
+    const vehicleAccessDate = toPortalDate(addDays(now, 2));
+    const visitEnds = toPortalDate(addDays(now, 30));
 
     const applicationBody = {
       personal_data: {
@@ -203,8 +237,8 @@ test('visitor application completes approval, check-in and check-out', async () 
       visit_data: {
         visit_reason: ['Automated lifecycle verification'],
         areas_of_access: ['Main Terminal', 'Operations Office'],
-        visit_starts: '22-07-2026',
-        visit_ends: '29-08-2026'
+        visit_starts: visitStarts,
+        visit_ends: visitEnds
       },
       supporting_documents: {
         identity_document_url: 'https://files.example.test/identity.pdf',
@@ -242,6 +276,33 @@ test('visitor application completes approval, check-in and check-out', async () 
       body: JSON.stringify({ decision: 'APPROVED', notes: 'Identity verified.' })
     });
     assert.equal(approved.status, 200);
+
+    const vehicleApplicationResponse = await fetch(
+      `${baseUrl}/public/vehicle-access-applications`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': vehicleKey.secret
+        },
+        body: JSON.stringify({
+          driver_name: 'Lifecycle Visitor',
+          driver_national_id_number: identityNumber,
+          vehicle_registration_number: `U${identityNumber.slice(-6)}`,
+          vehicle_type: 'Service van',
+          company: 'Lifecycle Aviation Ltd',
+          reason_for_access: 'Transport equipment for lifecycle verification',
+          access_gate: 'Main Gate',
+          date_of_access: vehicleAccessDate,
+          time_of_access: '14:30',
+          duration_of_access_hours: 6
+        })
+      }
+    );
+    assert.equal(vehicleApplicationResponse.status, 202);
+    const vehicleApplication = await vehicleApplicationResponse.json();
+    vehicleApplicationId = vehicleApplication.applicationId;
+    assert.equal(vehicleApplication.durationOfAccessHours, 6);
 
     const checkedIn = await fetch(`${baseUrl}/visitor-applications/${applicationId}/check-in`, {
       method: 'POST',
@@ -297,6 +358,9 @@ test('visitor application completes approval, check-in and check-out', async () 
     });
     assert.equal(blockedAfterRevocation.status, 401);
   } finally {
+    if (vehicleApplicationId) {
+      await db.execute('DELETE FROM vehicle_access_applications WHERE id = ?', [vehicleApplicationId]);
+    }
     if (applicationId) {
       await db.execute('DELETE FROM visit_sessions WHERE application_id = ?', [applicationId]);
       await db.execute('DELETE FROM visitor_applications WHERE id = ?', [applicationId]);
@@ -307,6 +371,9 @@ test('visitor application completes approval, check-in and check-out', async () 
     }
     if (externalApiKeyId) {
       await db.execute('DELETE FROM external_api_keys WHERE id = ?', [externalApiKeyId]);
+    }
+    if (vehicleApiKeyId) {
+      await db.execute('DELETE FROM external_api_keys WHERE id = ?', [vehicleApiKeyId]);
     }
     await db.execute('DELETE FROM user_profiles WHERE id = ?', [assistantId]);
     await db.execute('DELETE FROM user_profiles WHERE id = ?', [adminId]);
