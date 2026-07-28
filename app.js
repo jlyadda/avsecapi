@@ -39,7 +39,7 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 app.use(express.json({ limit: '100kb' }));
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.use(readinessRoutes);
 app.use(
   '/api',
