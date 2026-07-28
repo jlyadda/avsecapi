@@ -66,7 +66,10 @@ const authenticateToken = async (req, res, next) => {
   const [scheme, token] = authHeader?.split(' ') || [];
 
   if (scheme !== 'Bearer' || !token) {
-    return res.status(401).json({ error: 'Access denied. No token provided.' });
+    return res.status(401).json({
+      error: 'Access denied. No token provided.',
+      code: 'AUTH_TOKEN_REQUIRED'
+    });
   }
 
   try {
@@ -77,7 +80,10 @@ const authenticateToken = async (req, res, next) => {
     });
 
     if (!decoded.id || !decoded.jti) {
-      return res.status(403).json({ error: 'Invalid or expired token.' });
+      return res.status(403).json({
+        error: 'Invalid or expired token.',
+        code: 'AUTH_TOKEN_INVALID'
+      });
     }
 
     const [rows] = await db.execute(
@@ -90,7 +96,10 @@ const authenticateToken = async (req, res, next) => {
 
     const session = rows[0];
     if (!session || !session.is_active || session.revoked_at || new Date(session.expires_at) <= new Date()) {
-      return res.status(403).json({ error: 'Token has been revoked or the account is inactive.' });
+      return res.status(403).json({
+        error: 'Token has been revoked or the account is inactive.',
+        code: 'AUTH_SESSION_INVALID'
+      });
     }
 
     req.user = {
@@ -103,15 +112,24 @@ const authenticateToken = async (req, res, next) => {
   } catch (error) {
     if (!['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name)) {
       console.error(error);
-      return res.status(500).json({ error: 'Unable to verify authentication.' });
+      return res.status(500).json({
+        error: 'Unable to verify authentication.',
+        code: 'AUTH_VERIFICATION_FAILED'
+      });
     }
-    return res.status(403).json({ error: 'Invalid or expired token.' });
+    return res.status(403).json({
+      error: 'Invalid or expired token.',
+      code: 'AUTH_TOKEN_INVALID'
+    });
   }
 };
 
 const authorizePermission = (permission) => (req, res, next) => {
   if (!req.user || !hasPermission(req.user.role, permission)) {
-    return res.status(403).json({ error: 'Access denied. Missing permission.' });
+    return res.status(403).json({
+      error: 'Access denied. Missing permission.',
+      code: 'PERMISSION_DENIED'
+    });
   }
   return next();
 };

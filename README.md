@@ -39,11 +39,28 @@ GMAIL_USER=avsec@example.com
 GMAIL_APP_PASSWORD=your-google-app-password
 EMAIL_FROM_NAME=AVSEC
 PASSWORD_RESET_OTP_TTL_MINUTES=10
+API_RATE_LIMIT_MAX=1000
+API_RATE_LIMIT_WINDOW_MINUTES=15
+```
+
+The deployment also accepts the equivalent lower-camel SMTP names:
+
+```env
+gmailUser=avsec@example.com
+gmailAppSpecificPassword=your-google-app-password
+gmailSendserver=smtp.gmail.com
+gmailPort=587
 ```
 
 `GMAIL_APP_PASSWORD` must be a Google app password, not the mailbox's normal
 password. Restart the API after changing environment variables. Reset requests
 return `503` while Gmail delivery is not configured.
+
+Verify Gmail authentication without sending an email:
+
+```bash
+npm run email:verify
+```
 
 ## Authentication Model
 
@@ -68,6 +85,11 @@ Role changes and account deactivation therefore take effect immediately. The def
 | `viewer` | View only | No | No | View only | No | No | No | No |
 | `admin` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No |
 | `super_admin` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+
+Vehicle permit visibility follows application visibility. Review requires
+`supervisor`, `admin`, or `super_admin`; marking a permit used also allows
+`security_assistant`. Audit events require `audit`, `admin`, or `super_admin`.
+Reconciliation requires `supervisor`, `audit`, `admin`, or `super_admin`.
 
 ## Common Responses
 
@@ -106,6 +128,10 @@ Unknown routes return:
 }
 ```
 
+Every response includes `X-Request-Id`. Clients may provide a UUID in the
+request's `X-Request-Id` header; otherwise the API generates one. New endpoint
+errors include a stable `code` and a human-readable `error` message.
+
 ## Health
 
 ### `GET /health`
@@ -122,19 +148,32 @@ Checks whether the HTTP application is running. This route does not require auth
 
 This is a process-health check; it does not currently query the database.
 
+### `GET /ready`
+
+Checks database connectivity and confirms the latest required migration is
+applied. This route does not require authentication.
+
+```json
+{
+  "status": "ready",
+  "database": "ok"
+}
+```
+
+Database or migration failures return `503` with `status: "not_ready"` and a
+machine-readable `code`.
+
 ## Account Registration and Login
 
 ### `POST /api/register`
 
-Creates a pending internal staff account. This route is not authenticated.
+Creates a system user. This is not a public self-registration route.
 
-New accounts always receive:
+**Allowed roles:** `admin`, `super_admin`
 
-- Role: `security_assistant`
-- Status: inactive
-- Default department: `Aviation Security` when omitted
-
-An administrator must activate the account before it can log in.
+An `admin` may create roles below `admin`. Only `super_admin` may create
+`admin` or `super_admin` accounts. Role defaults to `security_assistant`,
+activation defaults to `true`, and department defaults to `Aviation Security`.
 
 **Request**
 
@@ -144,7 +183,9 @@ An administrator must activate the account before it can log in.
   "email": "j.lyadda@example.com",
   "password": "A-Strong-Password-123",
   "full_name": "Jonathan Lyadda",
-  "department": "Aviation Security"
+  "department": "Aviation Security",
+  "role": "security_assistant",
+  "is_active": true
 }
 ```
 
@@ -155,20 +196,28 @@ Validation:
 - `password`: 12–128 characters
 - `full_name`: optional, 2–255 characters
 - `department`: optional, 2–255 characters
+- `role`: optional role enum; defaults to `security_assistant`
+- `is_active`: optional boolean; defaults to `true`
 
-**Response — `202`**
+**Response — `201`**
 
 ```json
 {
-  "message": "Registration submitted for administrator approval.",
-  "userId": "7de251af-d19e-42b7-bc72-1640062be565"
+  "user": {
+    "id": "7de251af-d19e-42b7-bc72-1640062be565",
+    "user_name": "j.lyadda",
+    "email": "j.lyadda@example.com",
+    "role": "security_assistant",
+    "is_active": true
+  }
 }
 ```
 
 Possible errors:
 
+- `401`: bearer token missing or invalid
+- `403`: caller cannot create the requested role
 - `409`: username or email is already registered
-- `429`: more than 3 registration attempts from one client within 1 hour
 
 ### `POST /api/login`
 
@@ -587,6 +636,62 @@ Possible errors:
 - `404`: application not found
 - `409`: application is not currently checked in
 
+## Vehicle Access Permits
+
+Vehicle permit statuses are `SUBMITTED`, `APPROVED`, `REJECTED`, `CANCELLED`,
+and `USED`.
+
+### `GET /api/vehicle-access-applications`
+
+**Allowed roles:** all internal roles
+
+Supports `search`, `status`, `visit_from`, `visit_to`, `page`, and `page_size`.
+Search covers reference, driver name/NIN, registration number, and company.
+Dates use `YYYY-MM-DD`; page size defaults to 50 and is capped at 100.
+
+```json
+{
+  "applications": [],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 0,
+    "total_pages": 0
+  }
+}
+```
+
+### `GET /api/vehicle-access-applications/:reference`
+
+**Allowed roles:** all internal roles
+
+`:reference` may be the UUID or short `VAP-XXXXXXXX` reference. Returns
+`{ "application": {} }`, including driver identity reference, review fields,
+and permit-use fields.
+
+### `PATCH /api/vehicle-access-applications/:reference/decision`
+
+**Allowed roles:** `supervisor`, `admin`, `super_admin`
+
+```json
+{
+  "decision": "APPROVED",
+  "notes": "Driver and vehicle verified."
+}
+```
+
+Decision is `APPROVED` or `REJECTED`; rejection notes are required. Only a
+`SUBMITTED` permit may be reviewed. The transition and audit event commit in
+one transaction. Returns `{ "application": {} }`.
+
+### `POST /api/vehicle-access-applications/:reference/mark-used`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
+
+The request body must be `{}`. Only an `APPROVED` permit may become `USED`, and
+the current database time must fall within `access_starts_at` and
+`access_ends_at`. Returns `{ "application": {} }`.
+
 ## User Administration
 
 ### `GET /api/users`
@@ -723,6 +828,44 @@ Possible errors:
 
 Card numbers are unique. Creation, assignment, return, and condition changes run in database transactions. `card_assignments` records issuance/return officers and timestamps; `card_events` records inventory events.
 
+Access-level and category codes are managed by the API. Frontends should load
+them dynamically rather than maintaining a fixed enum.
+
+### `GET /api/card-access-levels`
+
+### `GET /api/card-categories`
+
+**Allowed roles:** all internal roles
+
+Both routes accept `include_inactive=true|false`. Responses contain stable
+`code`, editable `name`, `description`, `sort_order`, and `is_active`.
+
+### `POST /api/card-access-levels`
+
+### `POST /api/card-categories`
+
+**Allowed roles:** `admin`, `super_admin`
+
+```json
+{
+  "code": "RAMP_ESCORT",
+  "name": "Ramp Escort",
+  "description": "Escorted ramp access",
+  "sort_order": 60
+}
+```
+
+Codes are uppercase machine identifiers and cannot be renamed after creation.
+
+### `PATCH /api/card-access-levels/:id`
+
+### `PATCH /api/card-categories/:id`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Editable fields are `name`, `description`, `sort_order`, and `is_active`.
+Deactivation returns `409` while active cards still reference the value.
+
 ### `GET /api/access-cards`
 
 **Allowed roles:** all internal roles; `audit` and `viewer` are read-only
@@ -745,7 +888,9 @@ Supports `access_level`, `category`, `status`, and `search`. Status values are `
 }
 ```
 
-Access levels are `LEVEL_1`, `LEVEL_2`, `LEVEL_3`, `LEVEL_4`, and `ALL`. Categories are `VISITOR`, `STAFF`, `CONTRACTOR`, `ONE_DAY_DUTY`, and `PUBLIC_AREAS`.
+Seeded access levels are `LEVEL_1`, `LEVEL_2`, `LEVEL_3`, `LEVEL_4`, and `ALL`.
+Seeded categories are `VISITOR`, `STAFF`, `CONTRACTOR`, `ONE_DAY_DUTY`, and
+`PUBLIC_AREAS`. Administrators may add more values.
 
 ### `POST /api/access-cards`
 
@@ -761,6 +906,47 @@ Access levels are `LEVEL_1`, `LEVEL_2`, `LEVEL_3`, `LEVEL_4`, and `ALL`. Categor
 
 Returns `{ "card": {} }` with status `201`; duplicate card numbers return `409`.
 
+### `POST /api/access-cards/bulk`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Creates up to 500 cards atomically:
+
+```json
+{
+  "cards": [
+    {
+      "number": "PVG001",
+      "access_level": "LEVEL_1",
+      "category": "VISITOR"
+    }
+  ]
+}
+```
+
+Every card must use active taxonomy values. Any duplicate or invalid card rolls
+back the complete request.
+
+### `PATCH /api/access-cards/:id`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Updates `number`, `access_level`, and/or `category`. Assigned cards cannot be
+renumbered or reclassified.
+
+### `PATCH /api/access-cards/:id/activation`
+
+**Allowed roles:** `admin`, `super_admin`
+
+```json
+{
+  "is_active": false
+}
+```
+
+This soft-decommissions or reactivates a card. Assigned cards cannot be
+deactivated, and reactivation requires active taxonomy values.
+
 ### `PATCH /api/access-cards/:id/status`
 
 **Allowed roles:** `admin`, `super_admin`
@@ -772,6 +958,26 @@ Returns `{ "card": {} }` with status `201`; duplicate card numbers return `409`.
 ```
 
 Allowed values are `AVAILABLE`, `UNAVAILABLE`, `DAMAGED`, and `LOST`. An assigned card cannot change inventory condition and returns `409`.
+
+### `GET /api/access-cards/:id/assignments`
+
+**Allowed roles:** all internal roles
+
+Supports `page` and `page_size`; page size defaults to 50 and is capped at 100.
+Returns historical assignment and return officers, timestamps, application
+number, return condition, and assignment status.
+
+```json
+{
+  "assignments": [],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 0,
+    "total_pages": 0
+  }
+}
+```
 
 ### `POST /api/visitor-applications/:reference/card-assignment`
 
@@ -794,6 +1000,111 @@ The application must be `APPROVED` or `CHECKED_IN` and inside its approved date 
 The request body must be `{}`. This closes the assignment, records the returning officer and timestamp, and makes the card available atomically. Visitor checkout returns `409` until the card is returned.
 
 **Response — `200`:** `{ "application": {} }`
+
+## Audit Events
+
+### `GET /api/audit-events`
+
+**Allowed roles:** `audit`, `admin`, `super_admin`
+
+Supports `actor_id`, `action`, `resource_type`, `resource_id`, `from`, `to`,
+`page`, and `page_size`. Time filters require ISO 8601 values with an offset.
+Page size defaults to and is capped at 100.
+
+```json
+{
+  "events": [
+    {
+      "id": "uuid",
+      "occurred_at": "2026-07-28T08:00:00.000Z",
+      "actor_id": "uuid",
+      "actor_user_name": "j.lyadda",
+      "action": "VISITOR_CHECKED_IN",
+      "resource_type": "visitor_application",
+      "resource_id": "uuid",
+      "request_id": "uuid",
+      "metadata": {}
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 100,
+    "total": 1,
+    "total_pages": 1
+  }
+}
+```
+
+Audit rows are append-only through the API. Metadata contains operational
+references only and never stores passwords, JWTs, reset OTPs, API-key secrets,
+credential hashes, or identity-document content.
+
+## Card Reconciliation
+
+### `GET /api/reconciliation/cards`
+
+**Allowed roles:** `supervisor`, `audit`, `admin`, `super_admin`
+
+Requires `date=YYYY-MM-DD`. Optional parameters are `status`, `page`, and
+`page_size`. The snapshot reconstructs each card's state from append-only card
+events as of the end of the requested database-local date.
+
+```json
+{
+  "summary": {
+    "total": 555,
+    "available": 520,
+    "assigned": 20,
+    "unavailable": 5,
+    "damaged": 8,
+    "lost": 2
+  },
+  "cards": [],
+  "pagination": {}
+}
+```
+
+The summary always covers the full snapshot. `status` filters only the paginated
+`cards` collection.
+
+For cards classified as `ASSIGNED`, each item also includes `assignment_id`,
+`application_id`, `application_number`, `holder_name`, `holder_phone`, and
+`assigned_at`. New cards and returned cards are both `AVAILABLE`; return history
+is not a current status.
+
+### `POST /api/reconciliation/card-reports`
+
+**Allowed roles:** `supervisor`, `audit`, `admin`, `super_admin`
+
+Creates an immutable authoritative report snapshot:
+
+```json
+{
+  "date": "2026-07-28",
+  "notes": "End-of-day card reconciliation."
+}
+```
+
+The API calculates the summary, copies every card/holder row, records the
+reporter from the JWT, stores the request ID, and writes an audit event in one
+transaction. The response contains the complete snapshot for immediate PDF
+rendering.
+
+### `GET /api/reconciliation/card-reports`
+
+Lists saved reports with optional `date`, `page`, and `page_size`.
+
+### `GET /api/reconciliation/card-reports/:id`
+
+Returns one saved report and paginated immutable card items. Use this endpoint
+to regenerate or download a historical PDF instead of reading live card state.
+
+Recommended frontend report flow:
+
+1. Refresh taxonomy and inventory for operational display.
+2. Call `GET /api/reconciliation/cards` for a live preview.
+3. Call `POST /api/reconciliation/card-reports` to freeze the report.
+4. Render the PDF only from the returned saved snapshot.
 
 ## External API-Key Administration
 
@@ -930,9 +1241,8 @@ The current statistics cover visitor applications and pending staff accounts. Ve
 
 | Scope | Limit |
 |---|---|
-| All `/api` routes | 100 requests per 15 minutes per client |
+| All `/api` routes | Configurable; default 1,000 requests per 15 minutes per client |
 | Failed login attempts | 5 per 15 minutes |
-| Registration | 3 per hour |
 | Public visitor/vehicle submissions | 10 per hour |
 | Password-reset requests | 3 per 15 minutes |
 | Password-reset confirmations | 10 per 15 minutes |
@@ -952,7 +1262,6 @@ The API uses standard rate-limit response headers. In a multi-instance deploymen
 
 ## Current Internal API Gaps
 
-- Internal list, decision, and operational routes for vehicle access permits are not yet exposed.
-- Card assignment events are stored, but an internal audit-event listing endpoint is not yet exposed.
-
-Internal applications should not query the database directly to fill these gaps.
+No frontend-blocking internal route gaps are currently documented. Internal
+applications must continue to use authenticated API routes and must not query
+the database directly.

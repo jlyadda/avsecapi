@@ -1,13 +1,38 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
-const { authenticateApiKey } = require('../middleware');
+const {
+  authenticateApiKey,
+  authenticateToken,
+  authorizePermission
+} = require('../middleware');
 const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
+const { PERMISSIONS } = require('../permissions');
+const { recordAudit, sendError } = require('../audit');
 
 const router = express.Router();
 
 const normalizeName = (value) => value.toLowerCase().trim().split(/\s+/);
+
+const vehicleApplicationSelect = `
+  SELECT a.*, v.identity_type, v.identity_number, v.issuing_country,
+         reviewer.user_name AS reviewed_by_user_name,
+         permit_user.user_name AS used_by_user_name
+  FROM vehicle_access_applications a
+  INNER JOIN avsec_visitors v ON v.id = a.driver_visitor_id
+  LEFT JOIN user_profiles reviewer ON reviewer.id = a.reviewed_by
+  LEFT JOIN user_profiles permit_user ON permit_user.id = a.used_by`;
+
+const findVehicleApplication = async (executor, reference, lock = false) => {
+  const [rows] = await executor.execute(
+    `${vehicleApplicationSelect}
+     WHERE a.id = ? OR a.reference = ?
+     LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
+    [reference, reference]
+  );
+  return rows[0];
+};
 
 router.post(
   '/public/vehicle-access-applications',
@@ -119,6 +144,13 @@ router.post(
           req.apiClient.keyFingerprint
         ]
       );
+      await recordAudit(connection, {
+        action: 'VEHICLE_APPLICATION_SUBMITTED',
+        resourceType: 'vehicle_access_application',
+        resourceId: applicationId,
+        requestId: req.requestId,
+        metadata: { reference, source: 'external_api_key' }
+      });
 
       await connection.commit();
       return res.status(202).json({
@@ -141,6 +173,233 @@ router.post(
       }
       console.error(error);
       return res.status(500).json({ error: 'Unable to submit vehicle access application.' });
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+router.get(
+  '/vehicle-access-applications',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.VIEW_VEHICLE_APPLICATIONS),
+  validate(schemas.vehicleApplicationList),
+  async (req, res) => {
+    try {
+      const { search, status, visit_from, visit_to, page, page_size } = req.validatedQuery;
+      const conditions = [];
+      const parameters = [];
+      if (search) {
+        const value = `%${search}%`;
+        conditions.push(`(
+          a.reference LIKE ? OR a.driver_name LIKE ? OR v.identity_number LIKE ?
+          OR a.vehicle_registration_number LIKE ? OR a.company LIKE ?
+        )`);
+        parameters.push(...Array(5).fill(value));
+      }
+      if (status) {
+        conditions.push('a.status = ?');
+        parameters.push(status);
+      }
+      if (visit_from) {
+        conditions.push('a.date_of_access >= ?');
+        parameters.push(visit_from);
+      }
+      if (visit_to) {
+        conditions.push('a.date_of_access <= ?');
+        parameters.push(visit_to);
+      }
+      const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [[countRow]] = await db.execute(
+        `SELECT COUNT(*) AS total
+         FROM vehicle_access_applications a
+         INNER JOIN avsec_visitors v ON v.id = a.driver_visitor_id
+         ${whereClause}`,
+        parameters
+      );
+      const total = Number(countRow.total);
+      const [applications] = await db.execute(
+        `${vehicleApplicationSelect}
+         ${whereClause}
+         ORDER BY a.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...parameters, page_size, (page - 1) * page_size]
+      );
+      return res.json({
+        applications,
+        pagination: {
+          page,
+          page_size,
+          total,
+          total_pages: Math.ceil(total / page_size)
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'VEHICLE_APPLICATION_LIST_FAILED',
+        'Unable to list vehicle access applications.'
+      );
+    }
+  }
+);
+
+router.get(
+  '/vehicle-access-applications/:reference',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.VIEW_VEHICLE_APPLICATIONS),
+  validate(schemas.vehicleApplicationReference),
+  async (req, res) => {
+    try {
+      const application = await findVehicleApplication(db, req.params.reference);
+      if (!application) {
+        return sendError(res, 404, 'VEHICLE_APPLICATION_NOT_FOUND', 'Application not found.');
+      }
+      return res.json({ application });
+    } catch (error) {
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'VEHICLE_APPLICATION_LOAD_FAILED',
+        'Unable to load vehicle access application.'
+      );
+    }
+  }
+);
+
+router.patch(
+  '/vehicle-access-applications/:reference/decision',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.REVIEW_VEHICLE_APPLICATIONS),
+  validate(schemas.vehicleApplicationDecision),
+  async (req, res) => {
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const application = await findVehicleApplication(
+        connection,
+        req.params.reference,
+        true
+      );
+      if (!application) {
+        await connection.rollback();
+        return sendError(res, 404, 'VEHICLE_APPLICATION_NOT_FOUND', 'Application not found.');
+      }
+      if (application.status !== 'SUBMITTED') {
+        await connection.rollback();
+        return sendError(
+          res,
+          409,
+          'INVALID_VEHICLE_APPLICATION_TRANSITION',
+          `Application cannot be reviewed from ${application.status}.`
+        );
+      }
+      await connection.execute(
+        `UPDATE vehicle_access_applications
+         SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = NOW()
+         WHERE id = ?`,
+        [
+          req.body.decision,
+          req.body.notes || null,
+          req.user.id,
+          application.id
+        ]
+      );
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: `VEHICLE_APPLICATION_${req.body.decision}`,
+        resourceType: 'vehicle_access_application',
+        resourceId: application.id,
+        requestId: req.requestId,
+        metadata: { reference: application.reference }
+      });
+      await connection.commit();
+      const updated = await findVehicleApplication(db, application.id);
+      return res.json({ application: updated });
+    } catch (error) {
+      await connection.rollback();
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'VEHICLE_APPLICATION_DECISION_FAILED',
+        'Unable to review vehicle access application.'
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+router.post(
+  '/vehicle-access-applications/:reference/mark-used',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.USE_VEHICLE_PERMITS),
+  validate(schemas.vehicleApplicationMarkUsed),
+  async (req, res) => {
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const application = await findVehicleApplication(
+        connection,
+        req.params.reference,
+        true
+      );
+      if (!application) {
+        await connection.rollback();
+        return sendError(res, 404, 'VEHICLE_APPLICATION_NOT_FOUND', 'Application not found.');
+      }
+      if (application.status !== 'APPROVED') {
+        await connection.rollback();
+        return sendError(
+          res,
+          409,
+          'INVALID_VEHICLE_APPLICATION_TRANSITION',
+          `Permit cannot be marked used from ${application.status}.`
+        );
+      }
+      const [[clock]] = await connection.query(
+        'SELECT NOW() BETWEEN ? AND ? AS permit_is_current',
+        [application.access_starts_at, application.access_ends_at]
+      );
+      if (!clock.permit_is_current) {
+        await connection.rollback();
+        return sendError(
+          res,
+          409,
+          'VEHICLE_PERMIT_OUTSIDE_ACCESS_WINDOW',
+          'Permit can only be used during its approved access window.'
+        );
+      }
+      await connection.execute(
+        `UPDATE vehicle_access_applications
+         SET status = 'USED', used_by = ?, used_at = NOW(3)
+         WHERE id = ?`,
+        [req.user.id, application.id]
+      );
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: 'VEHICLE_PERMIT_USED',
+        resourceType: 'vehicle_access_application',
+        resourceId: application.id,
+        requestId: req.requestId,
+        metadata: { reference: application.reference }
+      });
+      await connection.commit();
+      const updated = await findVehicleApplication(db, application.id);
+      return res.json({ application: updated });
+    } catch (error) {
+      await connection.rollback();
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'VEHICLE_PERMIT_USE_FAILED',
+        'Unable to mark vehicle permit as used.'
+      );
     } finally {
       connection.release();
     }

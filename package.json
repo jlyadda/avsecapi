@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "db:migrate": "node scripts/migrate.js",
+    "email:verify": "node scripts/verify-email.js",
     "generate:api-key": "node scripts/generate-api-key.js",
     "start": "node server.js",
     "test": "node scripts/migrate.js && node --test"

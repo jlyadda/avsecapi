@@ -1,0 +1,4 @@
+ALTER TABLE card_events
+  MODIFY created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  ADD COLUMN event_order BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  ADD UNIQUE KEY card_events_order_key (event_order);

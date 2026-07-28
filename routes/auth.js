@@ -4,9 +4,11 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const config = require('../config');
-const { authenticateToken } = require('../middleware');
+const { authenticateToken, authorizePermission } = require('../middleware');
 const { validate, schemas } = require('../validation');
-const { loginLimiter, registerLimiter } = require('../rateLimits');
+const { loginLimiter } = require('../rateLimits');
+const { PERMISSIONS, canManageRole } = require('../permissions');
+const { recordAudit, sendError } = require('../audit');
 
 const router = express.Router();
 
@@ -31,38 +33,85 @@ const issueToken = async (executor, userId) => {
   return { token, jti, expiresAt };
 };
 
-router.post('/register', registerLimiter, validate(schemas.register), async (req, res) => {
-  const { user_name, email, password, full_name, department } = req.body;
-
-  try {
-    const [existingUsers] = await db.execute(
-      'SELECT id FROM user_profiles WHERE email = ? OR user_name = ?',
-      [email, user_name]
-    );
-
-    if (existingUsers.length > 0) {
-      return res.status(409).json({ error: 'Username or email already taken.' });
+router.post(
+  '/register',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.MANAGE_USERS),
+  validate(schemas.register),
+  async (req, res) => {
+    const {
+      user_name,
+      email,
+      password,
+      full_name,
+      department,
+      role,
+      is_active
+    } = req.body;
+    if (!canManageRole(req.user.role, role)) {
+      return sendError(
+        res,
+        403,
+        'USER_ROLE_CREATION_FORBIDDEN',
+        'You cannot create a user with this role.'
+      );
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
-    const newUserId = uuidv4();
+    const connection = await db.getConnection();
+    try {
+      const passwordHash = await bcrypt.hash(password, 12);
+      const newUserId = uuidv4();
+      await connection.beginTransaction();
+      await connection.execute(
+        `INSERT INTO user_profiles
+         (id, user_name, email, password_hash, full_name, department, user_role,
+          is_active, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newUserId,
+          user_name,
+          email,
+          passwordHash,
+          full_name || null,
+          department || 'Aviation Security',
+          role,
+          is_active,
+          req.user.id
+        ]
+      );
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: 'SYSTEM_USER_CREATED',
+        resourceType: 'user',
+        resourceId: newUserId,
+        requestId: req.requestId,
+        metadata: { role, is_active }
+      });
+      await connection.commit();
 
-    await db.execute(
-      `INSERT INTO user_profiles
-       (id, user_name, email, password_hash, full_name, department, user_role, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, 'security_assistant', 0)`,
-      [newUserId, user_name, email, passwordHash, full_name || null, department || 'Aviation Security']
-    );
-
-    return res.status(202).json({
-      message: 'Registration submitted for administrator approval.',
-      userId: newUserId
-    });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Database error during registration.' });
+      return res.status(201).json({
+        user: {
+          id: newUserId,
+          user_name,
+          email,
+          full_name: full_name || null,
+          department: department || 'Aviation Security',
+          role,
+          is_active
+        }
+      });
+    } catch (error) {
+      await connection.rollback();
+      if (error.code === 'ER_DUP_ENTRY') {
+        return sendError(res, 409, 'USER_ALREADY_EXISTS', 'Username or email already taken.');
+      }
+      console.error(error);
+      return sendError(res, 500, 'USER_CREATION_FAILED', 'Unable to create system user.');
+    } finally {
+      connection.release();
+    }
   }
-});
+);
 
 router.post('/login', loginLimiter, validate(schemas.login), async (req, res) => {
   const { identifier, password } = req.body;

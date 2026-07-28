@@ -1,12 +1,16 @@
 const { rateLimit } = require('express-rate-limit');
+const config = require('./config');
 
 const baseOptions = { standardHeaders: 'draft-8', legacyHeaders: false };
 
 const apiLimiter = rateLimit({
   ...baseOptions,
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  message: { error: 'Too many requests. Please try again later.' }
+  windowMs: config.API_RATE_LIMIT_WINDOW_MINUTES * 60 * 1000,
+  limit: config.API_RATE_LIMIT_MAX,
+  message: {
+    error: 'Too many requests. Please try again later.',
+    code: 'API_RATE_LIMIT_EXCEEDED'
+  }
 });
 
 const loginLimiter = rateLimit({

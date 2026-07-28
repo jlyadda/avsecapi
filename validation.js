@@ -53,7 +53,9 @@ const registerSchema = z.object({
     email,
     password: z.string().min(12).max(128),
     full_name: z.string().trim().min(2).max(255).optional(),
-    department: z.string().trim().min(2).max(255).optional()
+    department: z.string().trim().min(2).max(255).optional(),
+    role: z.enum(ROLES).default('security_assistant'),
+    is_active: z.boolean().default(true)
   }).strict()
 });
 
@@ -276,15 +278,20 @@ const userListSchema = z.object({
   }).strict()
 });
 
-const cardAccessLevel = z.enum(['LEVEL_1', 'LEVEL_2', 'LEVEL_3', 'LEVEL_4', 'ALL']);
-const cardCategory = z.enum(['VISITOR', 'STAFF', 'CONTRACTOR', 'ONE_DAY_DUTY', 'PUBLIC_AREAS']);
+const cardTaxonomyCode = z.string().trim().toUpperCase()
+  .min(2).max(50).regex(/^[A-Z0-9_]+$/);
+const cardAccessLevel = cardTaxonomyCode;
+const cardCategory = cardTaxonomyCode;
 
 const cardListSchema = z.object({
   query: z.object({
     access_level: cardAccessLevel.optional(),
     category: cardCategory.optional(),
     status: z.enum(['AVAILABLE', 'ASSIGNED', 'DAMAGED', 'LOST', 'UNAVAILABLE']).optional(),
-    search: z.string().trim().max(100).default('')
+    search: z.string().trim().max(100).default(''),
+    include_inactive: z.enum(['true', 'false', '1', '0']).default('false').transform(
+      (value) => value === 'true' || value === '1'
+    )
   }).strict()
 });
 
@@ -296,6 +303,63 @@ const cardCreateSchema = z.object({
   }).strict()
 });
 
+const cardBulkCreateSchema = z.object({
+  body: z.object({
+    cards: z.array(cardCreateSchema.shape.body).min(1).max(500)
+  }).strict().refine(
+    (body) => new Set(body.cards.map((card) => card.number)).size === body.cards.length,
+    { path: ['cards'], message: 'Card numbers must be unique within the request.' }
+  )
+});
+
+const cardUpdateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    number: z.string().trim().toUpperCase().min(2).max(100)
+      .regex(/^[A-Z0-9/_-]+$/).optional(),
+    access_level: cardAccessLevel.optional(),
+    category: cardCategory.optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one card field is required.'
+  )
+});
+
+const cardActivationSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({ is_active: z.boolean() }).strict()
+});
+
+const taxonomyListSchema = z.object({
+  query: z.object({
+    include_inactive: z.enum(['true', 'false', '1', '0']).default('false').transform(
+      (value) => value === 'true' || value === '1'
+    )
+  }).strict()
+});
+
+const taxonomyCreateSchema = z.object({
+  body: z.object({
+    code: cardTaxonomyCode,
+    name: z.string().trim().min(2).max(100),
+    description: z.string().trim().max(500).optional(),
+    sort_order: z.number().int().min(0).max(10000).default(0)
+  }).strict()
+});
+
+const taxonomyUpdateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    name: z.string().trim().min(2).max(100).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    sort_order: z.number().int().min(0).max(10000).optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one taxonomy field is required.'
+  )
+});
+
 const cardIdSchema = z.object({
   params: z.object({ id: uuid })
 });
@@ -304,6 +368,59 @@ const cardConditionSchema = z.object({
   params: z.object({ id: uuid }),
   body: z.object({
     status: z.enum(['AVAILABLE', 'UNAVAILABLE', 'DAMAGED', 'LOST'])
+  }).strict()
+});
+
+const cardAssignmentListSchema = z.object({
+  params: z.object({ id: uuid }),
+  query: z.object({ ...paginationQuery }).strict()
+});
+
+const auditEventListSchema = z.object({
+  query: z.object({
+    actor_id: uuid.optional(),
+    action: z.string().trim().min(1).max(100).regex(/^[A-Z0-9_]+$/).optional(),
+    resource_type: z.string().trim().min(1).max(100).regex(/^[a-z0-9_]+$/).optional(),
+    resource_id: z.string().trim().min(1).max(100).optional(),
+    from: z.iso.datetime({ offset: true }).transform((value) => new Date(value)).optional(),
+    to: z.iso.datetime({ offset: true }).transform((value) => new Date(value)).optional(),
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(100).default(100)
+  }).strict().refine(
+    (query) => !query.from || !query.to || query.to >= query.from,
+    { path: ['to'], message: 'Audit end time must not be before the start time.' }
+  )
+});
+
+const reconciliationSchema = z.object({
+  query: z.object({
+    date: isoDate,
+    status: z.enum(['AVAILABLE', 'ASSIGNED', 'UNAVAILABLE', 'DAMAGED', 'LOST']).optional(),
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(100).default(100)
+  }).strict()
+});
+
+const reconciliationReportCreateSchema = z.object({
+  body: z.object({
+    date: isoDate,
+    notes: z.string().trim().min(1).max(2000).optional()
+  }).strict()
+});
+
+const reconciliationReportListSchema = z.object({
+  query: z.object({
+    date: isoDate.optional(),
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(100).default(50)
+  }).strict()
+});
+
+const reconciliationReportIdSchema = z.object({
+  params: z.object({ id: uuid }),
+  query: z.object({
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(500).default(100)
   }).strict()
 });
 
@@ -385,6 +502,47 @@ const vehicleAccessApplicationSchema = z.object({
   }).strict()
 });
 
+const vehicleApplicationStatus = z.enum([
+  'SUBMITTED',
+  'APPROVED',
+  'REJECTED',
+  'CANCELLED',
+  'USED'
+]);
+
+const vehicleApplicationListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    status: vehicleApplicationStatus.optional(),
+    visit_from: isoDate.optional(),
+    visit_to: isoDate.optional(),
+    ...paginationQuery
+  }).strict().refine(
+    (query) => !query.visit_from || !query.visit_to || query.visit_to >= query.visit_from,
+    { path: ['visit_to'], message: 'Visit end filter must not be before the start filter.' }
+  )
+});
+
+const vehicleApplicationReferenceSchema = z.object({
+  params: z.object({ reference: applicationReference })
+});
+
+const vehicleApplicationDecisionSchema = z.object({
+  params: z.object({ reference: applicationReference }),
+  body: z.object({
+    decision: z.enum(['APPROVED', 'REJECTED']),
+    notes: z.string().trim().min(3).max(2000).optional()
+  }).strict().refine(
+    (body) => body.decision !== 'REJECTED' || Boolean(body.notes),
+    { path: ['notes'], message: 'Rejection notes are required.' }
+  )
+});
+
+const vehicleApplicationMarkUsedSchema = z.object({
+  params: z.object({ reference: applicationReference }),
+  body: z.object({}).strict()
+});
+
 const userStatusSchema = z.object({
   params: z.object({ id: uuid }),
   body: z.object({ is_active: z.boolean() }).strict()
@@ -405,6 +563,7 @@ const validate = (schema) => (req, res, next) => {
   if (!result.success) {
     return res.status(400).json({
       error: 'Validation failed.',
+      code: 'VALIDATION_FAILED',
       details: result.error.issues.map((issue) => ({
         field: issue.path.join('.'),
         message: issue.message
@@ -434,14 +593,30 @@ module.exports = {
     externalApiKeyCreate: externalApiKeyCreateSchema,
     externalApiKeyId: externalApiKeyIdSchema,
     vehicleAccessApplication: vehicleAccessApplicationSchema,
+    vehicleApplicationList: vehicleApplicationListSchema,
+    vehicleApplicationReference: vehicleApplicationReferenceSchema,
+    vehicleApplicationDecision: vehicleApplicationDecisionSchema,
+    vehicleApplicationMarkUsed: vehicleApplicationMarkUsedSchema,
     userStatus: userStatusSchema,
     userRole: userRoleSchema,
     userId: userIdSchema,
     userList: userListSchema,
     cardList: cardListSchema,
     cardCreate: cardCreateSchema,
+    cardBulkCreate: cardBulkCreateSchema,
+    cardUpdate: cardUpdateSchema,
+    cardActivation: cardActivationSchema,
     cardId: cardIdSchema,
     cardCondition: cardConditionSchema,
+    cardAssignmentList: cardAssignmentListSchema,
+    auditEventList: auditEventListSchema,
+    reconciliation: reconciliationSchema,
+    taxonomyList: taxonomyListSchema,
+    taxonomyCreate: taxonomyCreateSchema,
+    taxonomyUpdate: taxonomyUpdateSchema,
+    reconciliationReportCreate: reconciliationReportCreateSchema,
+    reconciliationReportList: reconciliationReportListSchema,
+    reconciliationReportId: reconciliationReportIdSchema,
     cardAssignment: cardAssignmentSchema,
     cardReturn: cardReturnSchema,
     accountUpdate: accountUpdateSchema,

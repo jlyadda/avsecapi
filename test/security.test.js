@@ -61,17 +61,19 @@ test('role permissions enforce application boundaries', () => {
   assert.equal(canManageRole('admin', 'admin'), false);
 });
 
-test('registration rejects caller-controlled roles', () => {
+test('registration validates administrator-selected roles strictly', () => {
   const result = schemas.register.safeParse({
     body: {
       user_name: 'candidate.user',
       email: 'candidate@example.com',
       password: 'StrongPassword12!',
-      user_role: 'super_admin'
+      role: 'security_assistant',
+      is_active: true
     }
   });
 
-  assert.equal(result.success, false);
+  assert.equal(result.success, true);
+  assert.equal(result.data.body.role, 'security_assistant');
 });
 
 test('public application validation normalizes identity and visit data', () => {
@@ -359,9 +361,14 @@ test('visitor application completes approval, check-in and check-out', async () 
     assert.equal(blockedAfterRevocation.status, 401);
   } finally {
     if (vehicleApplicationId) {
+      await db.execute(
+        'DELETE FROM audit_events WHERE resource_id = ?',
+        [vehicleApplicationId]
+      );
       await db.execute('DELETE FROM vehicle_access_applications WHERE id = ?', [vehicleApplicationId]);
     }
     if (applicationId) {
+      await db.execute('DELETE FROM audit_events WHERE resource_id = ?', [applicationId]);
       await db.execute('DELETE FROM visit_sessions WHERE application_id = ?', [applicationId]);
       await db.execute('DELETE FROM visitor_applications WHERE id = ?', [applicationId]);
     }

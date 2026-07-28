@@ -6,6 +6,7 @@ const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
 const { applicationSelect, findApplication } = require('./applicationHelpers');
+const { recordAudit } = require('../audit');
 
 const router = express.Router();
 
@@ -108,6 +109,13 @@ router.post(
           req.apiClient.keyFingerprint
         ]
       );
+      await recordAudit(connection, {
+        action: 'VISITOR_APPLICATION_SUBMITTED',
+        resourceType: 'visitor_application',
+        resourceId: applicationId,
+        requestId: req.requestId,
+        metadata: { application_number: applicationNumber, source: 'external_api_key' }
+      });
 
       await connection.commit();
       return res.status(202).json({
@@ -287,6 +295,14 @@ router.post(
           body.visit_ends
         ]
       );
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: 'VISITOR_APPLICATION_CREATED',
+        resourceType: 'visitor_application',
+        resourceId: applicationId,
+        requestId: req.requestId,
+        metadata: { application_number: applicationNumber, source: 'internal_staff' }
+      });
 
       await connection.commit();
       const application = await findApplication(db, applicationId);
@@ -331,30 +347,47 @@ router.patch(
   authorizePermission(PERMISSIONS.REVIEW_APPLICATIONS),
   validate(schemas.applicationDecision),
   async (req, res) => {
+    const connection = await db.getConnection();
     try {
-      const [result] = await db.execute(
+      await connection.beginTransaction();
+      const application = await findApplication(connection, req.params.reference, true);
+      if (!application) {
+        await connection.rollback();
+        return res.status(404).json({ error: 'Application not found.' });
+      }
+      if (application.status !== 'SUBMITTED') {
+        await connection.rollback();
+        return res.status(409).json({
+          error: `Application cannot be reviewed from ${application.status}.`
+        });
+      }
+      await connection.execute(
         `UPDATE visitor_applications
          SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = NOW()
-         WHERE (id = ? OR application_number = ?) AND status = 'SUBMITTED'`,
+         WHERE id = ?`,
         [
           req.body.decision,
           req.body.notes || null,
           req.user.id,
-          req.params.reference,
-          req.params.reference
+          application.id
         ]
       );
-
-      if (result.affectedRows === 0) {
-        const application = await findApplication(db, req.params.reference);
-        if (!application) return res.status(404).json({ error: 'Application not found.' });
-        return res.status(409).json({ error: `Application cannot be reviewed from ${application.status}.` });
-      }
-
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: `VISITOR_APPLICATION_${req.body.decision}`,
+        resourceType: 'visitor_application',
+        resourceId: application.id,
+        requestId: req.requestId,
+        metadata: { application_number: application.application_number }
+      });
+      await connection.commit();
       return res.json({ status: req.body.decision, message: 'Application decision recorded.' });
     } catch (error) {
+      await connection.rollback();
       console.error(error);
       return res.status(500).json({ error: 'Unable to review visitor application.' });
+    } finally {
+      connection.release();
     }
   }
 );
@@ -394,6 +427,17 @@ router.post(
         "UPDATE visitor_applications SET status = 'CHECKED_IN' WHERE id = ?",
         [application.id]
       );
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: 'VISITOR_CHECKED_IN',
+        resourceType: 'visitor_application',
+        resourceId: application.id,
+        requestId: req.requestId,
+        metadata: {
+          application_number: application.application_number,
+          gate: req.body.gate || null
+        }
+      });
       await connection.commit();
       return res.json({ status: 'CHECKED_IN', message: 'Visitor checked in.' });
     } catch (error) {
@@ -452,6 +496,14 @@ router.post(
         'UPDATE avsec_visitors SET last_visit = CURDATE() WHERE id = ?',
         [application.visitor_id]
       );
+      await recordAudit(connection, {
+        actorId: req.user.id,
+        action: 'VISITOR_CHECKED_OUT',
+        resourceType: 'visitor_application',
+        resourceId: application.id,
+        requestId: req.requestId,
+        metadata: { application_number: application.application_number }
+      });
       await connection.commit();
       return res.json({ status: 'CHECKED_OUT', message: 'Visitor checked out.' });
     } catch (error) {

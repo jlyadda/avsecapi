@@ -1,14 +1,40 @@
 const nodemailer = require('nodemailer');
+require('dotenv').config({ quiet: true });
 const config = require('./config');
 
-const isEmailConfigured = Boolean(config.GMAIL_USER && config.GMAIL_APP_PASSWORD);
+const gmailUser = (process.env.gmailUser || process.env.GMAIL_USER || '').trim();
+const gmailAppPassword = (
+  process.env.gmailAppSpecificPassword
+  || process.env.GMAIL_APP_PASSWORD
+  || ''
+).replace(/\s/g, '');
+const gmailSmtpHost = (
+  process.env.gmailSendserver
+  || process.env.GMAIL_SMTP_HOST
+  || 'smtp.gmail.com'
+).trim();
+const gmailSmtpPort = Number(
+  process.env.gmailPort
+  || process.env.GMAIL_SMTP_PORT
+  || 587
+);
+
+const isEmailConfigured = Boolean(
+  gmailUser
+  && gmailSmtpHost
+  && Number.isInteger(gmailSmtpPort)
+  && gmailAppPassword.length >= 16
+);
 
 const transporter = isEmailConfigured
   ? nodemailer.createTransport({
-    service: 'gmail',
+    host: gmailSmtpHost,
+    port: gmailSmtpPort,
+    secure: gmailSmtpPort === 465,
+    requireTLS: gmailSmtpPort === 587,
     auth: {
-      user: config.GMAIL_USER,
-      pass: config.GMAIL_APP_PASSWORD
+      user: gmailUser,
+      pass: gmailAppPassword
     }
   })
   : null;
@@ -19,7 +45,7 @@ const sendPasswordResetOtp = async ({ email, fullName, otp }) => {
   await transporter.sendMail({
     from: {
       name: config.EMAIL_FROM_NAME,
-      address: config.GMAIL_USER
+      address: gmailUser
     },
     to: email,
     subject: 'AVSEC password reset code',
@@ -34,4 +60,13 @@ const sendPasswordResetOtp = async ({ email, fullName, otp }) => {
   });
 };
 
-module.exports = { isEmailConfigured, sendPasswordResetOtp };
+const verifyEmailTransport = async () => {
+  if (!transporter) throw new Error('Email delivery is not configured.');
+  return transporter.verify();
+};
+
+module.exports = {
+  isEmailConfigured,
+  sendPasswordResetOtp,
+  verifyEmailTransport
+};
