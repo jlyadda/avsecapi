@@ -41,6 +41,7 @@ EMAIL_FROM_NAME=AVSEC
 PASSWORD_RESET_OTP_TTL_MINUTES=10
 API_RATE_LIMIT_MAX=1000
 API_RATE_LIMIT_WINDOW_MINUTES=15
+NOTIFICATION_WORKER_INTERVAL_MS=10000
 ```
 
 The deployment also accepts the equivalent lower-camel SMTP names:
@@ -422,6 +423,9 @@ Supports `search`, `status`, `visit_from`, `visit_to`, `page`, and `page_size`. 
 ```
 
 Each item uses the same shape as the single-application route.
+
+Reviewed applications return the reviewer's display name in `reviewed_by` and
+retain the UUID in `reviewed_by_id`.
 
 ### `POST /api/visitor-applications`
 
@@ -1236,6 +1240,122 @@ Returns summary counts for the internal administrative dashboard.
 ```
 
 The current statistics cover visitor applications and pending staff accounts. Vehicle-permit statistics are not yet included.
+
+## Notifications
+
+Notifications support `IN_APP` and `EMAIL` channels and snapshot recipients at
+creation time. Sources are `USER` for administrator broadcasts and `SYSTEM` for
+domain-triggered messages.
+
+### `POST /api/notifications`
+
+**Allowed roles:** `admin`, `super_admin`
+
+```json
+{
+  "type": "SHIFT_NOTICE",
+  "title": "Night shift briefing",
+  "body": "Report to the briefing room.",
+  "priority": "HIGH",
+  "channels": ["IN_APP", "EMAIL"],
+  "targets": [
+    {
+      "type": "ROLE",
+      "value": "security_assistant"
+    }
+  ],
+  "scheduled_at": null,
+  "expires_at": "2026-07-29T18:00:00.000Z"
+}
+```
+
+Target types are:
+
+- `ALL`
+- `ROLE`
+- `DEPARTMENT`
+- `GROUP`
+- `USER`
+
+An `admin` broadcast excludes `super_admin` recipients. A `super_admin` may
+target every active account.
+
+### `GET /api/notifications`
+
+Returns the authenticated user's non-archived inbox. Supports `unread`,
+`priority`, `page`, and `page_size`.
+
+### `GET /api/notifications/unread-count`
+
+Returns `{ "unread": 0 }`. Poll this every 30–60 seconds for notification badges.
+
+### `PATCH /api/notifications/:id/read`
+
+Marks one recipient notification as read.
+
+### `POST /api/notifications/read-all`
+
+Marks every notification for the authenticated user as read. Body must be `{}`.
+
+### `PATCH /api/notifications/:id/archive`
+
+Archives one notification for the authenticated user.
+
+### `GET /api/notifications/:id/deliveries`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Returns paginated channel status, recipient, attempt count, and sent timestamp.
+Provider error details are intentionally not returned.
+
+### Notification Groups
+
+```http
+GET /api/notification-groups
+POST /api/notification-groups
+PATCH /api/notification-groups/:id
+PUT /api/notification-groups/:id/members
+```
+
+**Allowed roles:** `admin`, `super_admin`
+
+Create a group:
+
+```json
+{
+  "name": "Night Shift",
+  "description": "Current night-shift security team",
+  "user_ids": ["user-uuid"]
+}
+```
+
+Replacing members uses `{ "user_ids": [] }`. Administrators cannot add
+`admin` or `super_admin` accounts to groups; super administrators can.
+
+### System Triggers
+
+The API currently creates notifications for:
+
+- Visitor applications submitted.
+- Visitor applications approved or rejected.
+- Vehicle access applications submitted.
+- Cards marked damaged or lost.
+- New active system users.
+
+Application decisions and account creation may target external or user email
+addresses. Submission and card-alert events target relevant internal roles.
+
+Business data, audit rows, recipient snapshots, and outbox records commit in the
+same transaction.
+
+### Email Worker
+
+Email is never sent inside the HTTP request. `notificationWorker.js` processes
+the transactional outbox every `NOTIFICATION_WORKER_INTERVAL_MS`, records each
+delivery attempt, retries transient failures with exponential delay, and stops
+retrying permanent Gmail authentication failures.
+
+Run `npm run email:verify` before enabling email notifications in production.
 
 ## Rate Limits
 

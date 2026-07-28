@@ -424,6 +424,107 @@ const reconciliationReportIdSchema = z.object({
   }).strict()
 });
 
+const notificationTarget = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('ALL') }).strict(),
+  z.object({ type: z.literal('ROLE'), value: z.enum(ROLES) }).strict(),
+  z.object({
+    type: z.literal('DEPARTMENT'),
+    value: z.string().trim().min(2).max(255)
+  }).strict(),
+  z.object({ type: z.literal('GROUP'), value: uuid }).strict(),
+  z.object({ type: z.literal('USER'), value: uuid }).strict()
+]);
+
+const notificationCreateSchema = z.object({
+  body: z.object({
+    type: z.string().trim().toUpperCase().min(2).max(100).regex(/^[A-Z0-9_]+$/)
+      .default('ANNOUNCEMENT'),
+    title: z.string().trim().min(2).max(255),
+    body: z.string().trim().min(2).max(5000),
+    priority: z.enum(['LOW', 'NORMAL', 'HIGH', 'CRITICAL']).default('NORMAL'),
+    channels: z.array(z.enum(['IN_APP', 'EMAIL'])).min(1).max(2)
+      .transform((channels) => [...new Set(channels)]),
+    targets: z.array(notificationTarget).min(1).max(20),
+    scheduled_at: z.iso.datetime({ offset: true }).transform((value) => new Date(value))
+      .optional(),
+    expires_at: z.iso.datetime({ offset: true }).transform((value) => new Date(value))
+      .optional()
+  }).strict().superRefine((body, context) => {
+    if (body.scheduled_at && body.scheduled_at <= new Date()) {
+      context.addIssue({
+        code: 'custom',
+        path: ['scheduled_at'],
+        message: 'Scheduled time must be in the future.'
+      });
+    }
+    if (
+      body.expires_at
+      && body.expires_at <= (body.scheduled_at || new Date())
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expires_at'],
+        message: 'Expiry must be after delivery time.'
+      });
+    }
+  })
+});
+
+const notificationListSchema = z.object({
+  query: z.object({
+    unread: z.enum(['true', 'false', '1', '0']).transform(
+      (value) => value === 'true' || value === '1'
+    ).optional(),
+    priority: z.enum(['LOW', 'NORMAL', 'HIGH', 'CRITICAL']).optional(),
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(100).default(50)
+  }).strict()
+});
+
+const notificationIdSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({}).strict().optional()
+});
+
+const notificationReadAllSchema = z.object({
+  body: z.object({}).strict()
+});
+
+const notificationDeliveryListSchema = z.object({
+  params: z.object({ id: uuid }),
+  query: z.object({
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(100).default(50)
+  }).strict()
+});
+
+const notificationGroupCreateSchema = z.object({
+  body: z.object({
+    name: z.string().trim().min(2).max(150),
+    description: z.string().trim().max(500).optional(),
+    user_ids: z.array(uuid).max(500).default([])
+  }).strict()
+});
+
+const notificationGroupUpdateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    name: z.string().trim().min(2).max(150).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one group field is required.'
+  )
+});
+
+const notificationGroupMembersSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    user_ids: z.array(uuid).max(500)
+  }).strict()
+});
+
 const cardAssignmentSchema = z.object({
   params: z.object({ reference: applicationReference }),
   body: z.object({
@@ -617,6 +718,14 @@ module.exports = {
     reconciliationReportCreate: reconciliationReportCreateSchema,
     reconciliationReportList: reconciliationReportListSchema,
     reconciliationReportId: reconciliationReportIdSchema,
+    notificationCreate: notificationCreateSchema,
+    notificationList: notificationListSchema,
+    notificationId: notificationIdSchema,
+    notificationReadAll: notificationReadAllSchema,
+    notificationDeliveryList: notificationDeliveryListSchema,
+    notificationGroupCreate: notificationGroupCreateSchema,
+    notificationGroupUpdate: notificationGroupUpdateSchema,
+    notificationGroupMembers: notificationGroupMembersSchema,
     cardAssignment: cardAssignmentSchema,
     cardReturn: cardReturnSchema,
     accountUpdate: accountUpdateSchema,

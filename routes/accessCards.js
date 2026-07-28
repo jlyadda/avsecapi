@@ -6,6 +6,7 @@ const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { findApplication } = require('./applicationHelpers');
 const { recordAudit } = require('../audit');
+const { createSystemNotification } = require('../notificationService');
 
 const router = express.Router();
 
@@ -506,6 +507,22 @@ router.patch(
         requestId: req.requestId,
         metadata: { number: card.number }
       });
+      if (['DAMAGED', 'LOST'].includes(req.body.status)) {
+        await createSystemNotification(connection, {
+          templateCode: 'ACCESS_CARD_ALERT',
+          values: { number: card.number, status: req.body.status.toLowerCase() },
+          requestId: req.requestId,
+          resourceType: 'access_card',
+          resourceId: card.id,
+          targets: [
+            { type: 'ROLE', value: 'admin' },
+            { type: 'ROLE', value: 'super_admin' },
+            { type: 'ROLE', value: 'audit' }
+          ],
+          channels: ['IN_APP', 'EMAIL'],
+          metadata: { number: card.number, status: req.body.status }
+        });
+      }
       await connection.commit();
       return res.json({ message: `Card marked ${req.body.status}.` });
     } catch (error) {

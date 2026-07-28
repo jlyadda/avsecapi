@@ -2,6 +2,10 @@ const app = require('./app');
 const config = require('./config');
 const db = require('./db');
 const { initializeDatabase } = require('./databaseInitializer');
+const {
+  startNotificationWorker,
+  stopNotificationWorker
+} = require('./notificationWorker');
 
 let server;
 
@@ -10,10 +14,12 @@ const start = async () => {
   server = app.listen(config.PORT, () => {
     console.log(`Server running on port ${config.PORT}`);
   });
+  startNotificationWorker();
 };
 
 const shutdown = async (signal) => {
   console.log(`${signal} received; shutting down.`);
+  stopNotificationWorker();
   if (!server) {
     await db.end();
     return;

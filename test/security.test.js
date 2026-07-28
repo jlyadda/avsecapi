@@ -362,12 +362,17 @@ test('visitor application completes approval, check-in and check-out', async () 
   } finally {
     if (vehicleApplicationId) {
       await db.execute(
+        'DELETE FROM notifications WHERE resource_id = ?',
+        [vehicleApplicationId]
+      );
+      await db.execute(
         'DELETE FROM audit_events WHERE resource_id = ?',
         [vehicleApplicationId]
       );
       await db.execute('DELETE FROM vehicle_access_applications WHERE id = ?', [vehicleApplicationId]);
     }
     if (applicationId) {
+      await db.execute('DELETE FROM notifications WHERE resource_id = ?', [applicationId]);
       await db.execute('DELETE FROM audit_events WHERE resource_id = ?', [applicationId]);
       await db.execute('DELETE FROM visit_sessions WHERE application_id = ?', [applicationId]);
       await db.execute('DELETE FROM visitor_applications WHERE id = ?', [applicationId]);

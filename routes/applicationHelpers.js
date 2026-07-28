@@ -12,9 +12,12 @@ const applicationSelect = `
            WHEN c.is_assigned = 1 THEN 'ASSIGNED'
            WHEN c.is_available = 1 THEN 'AVAILABLE'
            ELSE 'UNAVAILABLE'
-         END AS card_status
+         END AS card_status,
+         a.reviewed_by AS reviewed_by_id,
+         COALESCE(reviewer.full_name, reviewer.user_name) AS reviewed_by
   FROM visitor_applications a
   INNER JOIN avsec_visitors v ON v.id = a.visitor_id
+  LEFT JOIN user_profiles reviewer ON reviewer.id = a.reviewed_by
   LEFT JOIN access_cards c ON c.current_application_id = a.id
   LEFT JOIN card_access_levels card_level ON card_level.code = c.access_level
   LEFT JOIN card_categories card_category ON card_category.code = c.category`;

@@ -218,6 +218,15 @@ test('remaining internal operations are authenticated, audited and paginated', a
     assert.ok(auditBody.events[0].request_id);
   } finally {
     await db.execute(
+      `DELETE FROM notifications
+       WHERE resource_id IN (?, ?, ?)`,
+      [
+        vehicleApplicationId,
+        visitorApplicationId,
+        createdUserId || ''
+      ]
+    );
+    await db.execute(
       `DELETE FROM audit_events
        WHERE actor_id = ?
           OR resource_id IN (?, ?, ?, ?)`,

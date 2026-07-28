@@ -7,6 +7,7 @@ const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
 const { applicationSelect, findApplication } = require('./applicationHelpers');
 const { recordAudit } = require('../audit');
+const { createSystemNotification } = require('../notificationService');
 
 const router = express.Router();
 
@@ -115,6 +116,20 @@ router.post(
         resourceId: applicationId,
         requestId: req.requestId,
         metadata: { application_number: applicationNumber, source: 'external_api_key' }
+      });
+      await createSystemNotification(connection, {
+        templateCode: 'VISITOR_APPLICATION_SUBMITTED',
+        values: { reference: applicationNumber },
+        requestId: req.requestId,
+        resourceType: 'visitor_application',
+        resourceId: applicationId,
+        targets: [
+          { type: 'ROLE', value: 'supervisor' },
+          { type: 'ROLE', value: 'admin' },
+          { type: 'ROLE', value: 'super_admin' }
+        ],
+        channels: ['IN_APP', 'EMAIL'],
+        metadata: { application_number: applicationNumber }
       });
 
       await connection.commit();
@@ -303,6 +318,20 @@ router.post(
         requestId: req.requestId,
         metadata: { application_number: applicationNumber, source: 'internal_staff' }
       });
+      await createSystemNotification(connection, {
+        templateCode: 'VISITOR_APPLICATION_SUBMITTED',
+        values: { reference: applicationNumber },
+        requestId: req.requestId,
+        resourceType: 'visitor_application',
+        resourceId: applicationId,
+        targets: [
+          { type: 'ROLE', value: 'supervisor' },
+          { type: 'ROLE', value: 'admin' },
+          { type: 'ROLE', value: 'super_admin' }
+        ],
+        channels: ['IN_APP', 'EMAIL'],
+        metadata: { application_number: applicationNumber }
+      });
 
       await connection.commit();
       const application = await findApplication(db, applicationId);
@@ -379,6 +408,24 @@ router.patch(
         resourceId: application.id,
         requestId: req.requestId,
         metadata: { application_number: application.application_number }
+      });
+      await createSystemNotification(connection, {
+        templateCode: 'VISITOR_APPLICATION_DECIDED',
+        values: {
+          reference: application.application_number,
+          decision: req.body.decision.toLowerCase()
+        },
+        requestId: req.requestId,
+        resourceType: 'visitor_application',
+        resourceId: application.id,
+        targets: [
+          { type: 'EXTERNAL_EMAIL', value: application.personal_email }
+        ],
+        channels: ['EMAIL'],
+        metadata: {
+          application_number: application.application_number,
+          decision: req.body.decision
+        }
       });
       await connection.commit();
       return res.json({ status: req.body.decision, message: 'Application decision recorded.' });

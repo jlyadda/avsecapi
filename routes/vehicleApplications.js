@@ -10,6 +10,7 @@ const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
 const { PERMISSIONS } = require('../permissions');
 const { recordAudit, sendError } = require('../audit');
+const { createSystemNotification } = require('../notificationService');
 
 const router = express.Router();
 
@@ -17,7 +18,8 @@ const normalizeName = (value) => value.toLowerCase().trim().split(/\s+/);
 
 const vehicleApplicationSelect = `
   SELECT a.*, v.identity_type, v.identity_number, v.issuing_country,
-         reviewer.user_name AS reviewed_by_user_name,
+         a.reviewed_by AS reviewed_by_id,
+         COALESCE(reviewer.full_name, reviewer.user_name) AS reviewed_by,
          permit_user.user_name AS used_by_user_name
   FROM vehicle_access_applications a
   INNER JOIN avsec_visitors v ON v.id = a.driver_visitor_id
@@ -150,6 +152,20 @@ router.post(
         resourceId: applicationId,
         requestId: req.requestId,
         metadata: { reference, source: 'external_api_key' }
+      });
+      await createSystemNotification(connection, {
+        templateCode: 'VEHICLE_APPLICATION_SUBMITTED',
+        values: { reference },
+        requestId: req.requestId,
+        resourceType: 'vehicle_access_application',
+        resourceId: applicationId,
+        targets: [
+          { type: 'ROLE', value: 'supervisor' },
+          { type: 'ROLE', value: 'admin' },
+          { type: 'ROLE', value: 'super_admin' }
+        ],
+        channels: ['IN_APP', 'EMAIL'],
+        metadata: { reference }
       });
 
       await connection.commit();

@@ -15,6 +15,8 @@ const auditEventRoutes = require('./routes/auditEvents');
 const reconciliationRoutes = require('./routes/reconciliation');
 const readinessRoutes = require('./routes/readiness');
 const cardTaxonomyRoutes = require('./routes/cardTaxonomy');
+const notificationRoutes = require('./routes/notifications');
+const notificationGroupRoutes = require('./routes/notificationGroups');
 const { apiLimiter } = require('./rateLimits');
 
 const app = express();
@@ -52,6 +54,8 @@ app.use(
   auditEventRoutes,
   reconciliationRoutes,
   cardTaxonomyRoutes,
+  notificationRoutes,
+  notificationGroupRoutes,
   visitorRoutes,
   userRoutes
 );

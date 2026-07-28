@@ -60,6 +60,19 @@ const sendPasswordResetOtp = async ({ email, fullName, otp }) => {
   });
 };
 
+const sendNotificationEmail = async ({ email, title, body }) => {
+  if (!transporter) throw new Error('Email delivery is not configured.');
+  await transporter.sendMail({
+    from: {
+      name: config.EMAIL_FROM_NAME,
+      address: gmailUser
+    },
+    to: email,
+    subject: title,
+    text: body
+  });
+};
+
 const verifyEmailTransport = async () => {
   if (!transporter) throw new Error('Email delivery is not configured.');
   return transporter.verify();
@@ -68,5 +81,6 @@ const verifyEmailTransport = async () => {
 module.exports = {
   isEmailConfigured,
   sendPasswordResetOtp,
+  sendNotificationEmail,
   verifyEmailTransport
 };

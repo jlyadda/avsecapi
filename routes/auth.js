@@ -9,6 +9,7 @@ const { validate, schemas } = require('../validation');
 const { loginLimiter } = require('../rateLimits');
 const { PERMISSIONS, canManageRole } = require('../permissions');
 const { recordAudit, sendError } = require('../audit');
+const { createSystemNotification } = require('../notificationService');
 
 const router = express.Router();
 
@@ -87,6 +88,18 @@ router.post(
         requestId: req.requestId,
         metadata: { role, is_active }
       });
+      if (is_active) {
+        await createSystemNotification(connection, {
+          templateCode: 'SYSTEM_USER_CREATED',
+          values: {},
+          requestId: req.requestId,
+          resourceType: 'user',
+          resourceId: newUserId,
+          targets: [{ type: 'USER', value: newUserId }],
+          channels: ['IN_APP', 'EMAIL'],
+          metadata: { role }
+        });
+      }
       await connection.commit();
 
       return res.status(201).json({

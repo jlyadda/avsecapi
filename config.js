@@ -25,6 +25,8 @@ const envSchema = z.object({
   PASSWORD_RESET_OTP_TTL_MINUTES: z.coerce.number().int().min(5).max(30).default(10),
   API_RATE_LIMIT_MAX: z.coerce.number().int().min(100).max(10000).default(1000),
   API_RATE_LIMIT_WINDOW_MINUTES: z.coerce.number().int().min(1).max(60).default(15),
+  NOTIFICATION_WORKER_INTERVAL_MS: z.coerce.number().int().min(1000).max(60000)
+    .default(10000),
   PUBLIC_APP_API_KEYS: z.string().default('').refine(
     (value) => value === '' || value.split(',').every((key) => key.trim().length >= 32),
     'Every public application API key must contain at least 32 characters.'

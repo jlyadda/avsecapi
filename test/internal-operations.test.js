@@ -231,6 +231,9 @@ test('internal application, card, account, user list and refresh workflows', asy
     });
     assert.equal(newTokenAccepted.status, 200);
   } finally {
+    if (applicationId) {
+      await db.execute('DELETE FROM notifications WHERE resource_id = ?', [applicationId]);
+    }
     await db.execute(
       `DELETE FROM audit_events
        WHERE actor_id IN (?, ?)

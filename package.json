@@ -8,7 +8,7 @@
     "email:verify": "node scripts/verify-email.js",
     "generate:api-key": "node scripts/generate-api-key.js",
     "start": "node server.js",
-    "test": "node scripts/migrate.js && node --test"
+    "test": "node scripts/migrate.js && node --test --test-concurrency=1"
   },
   "keywords": [],
   "author": "",
