@@ -14,7 +14,7 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32),
   JWT_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(18000),
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
-  CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:5173'),
+  CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
   GMAIL_USER: z.string().trim().default(''),
   GMAIL_APP_PASSWORD: z.string().trim().default(''),
   gmailUser: z.string().trim().default(''),

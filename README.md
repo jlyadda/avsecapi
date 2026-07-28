@@ -29,7 +29,7 @@ Authorization: Bearer <jwt-token>
 
 Browser clients must have their exact origin listed in the comma-separated
 `CORS_ALLOWED_ORIGINS` environment variable. It defaults to
-`http://localhost:5173` for local development. Production deployments should
+`http://localhost:3000` for local development. Production deployments should
 set only trusted HTTPS frontend origins.
 
 Password-reset email delivery uses Gmail SMTP with an app password:

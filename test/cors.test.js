@@ -14,7 +14,7 @@ test('CORS preflight permits the configured frontend origin', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/login`, {
       method: 'OPTIONS',
       headers: {
-        origin: 'http://localhost:5173',
+        origin: 'http://localhost:3000',
         'access-control-request-method': 'POST',
         'access-control-request-headers': 'content-type'
       }
@@ -23,7 +23,7 @@ test('CORS preflight permits the configured frontend origin', async () => {
     assert.equal(response.status, 204);
     assert.equal(
       response.headers.get('access-control-allow-origin'),
-      'http://localhost:5173'
+      'http://localhost:3000'
     );
     assert.equal(response.headers.get('access-control-allow-credentials'), 'true');
     assert.match(response.headers.get('access-control-allow-methods'), /POST/);
