@@ -180,6 +180,8 @@ const applicationCheckOutSchema = z.object({
 
 const applicationStatus = z.enum([
   'SUBMITTED',
+  'UNDER_REVIEW',
+  'NEEDS_CORRECTION',
   'APPROVED',
   'REJECTED',
   'CHECKED_IN',
@@ -658,6 +660,167 @@ const userIdSchema = z.object({
   params: z.object({ id: uuid })
 });
 
+const workflowCode = z.string().trim().toUpperCase()
+  .min(2).max(80).regex(/^[A-Z][A-Z0-9_]*$/);
+
+const workflowGroupCreateSchema = z.object({
+  body: z.object({
+    code: workflowCode,
+    name: z.string().trim().min(2).max(150),
+    description: z.string().trim().max(500).optional(),
+    user_ids: z.array(uuid).max(200).default([])
+  }).strict()
+});
+
+const workflowGroupUpdateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    name: z.string().trim().min(2).max(150).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one field is required.'
+  )
+});
+
+const workflowGroupMembersSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({ user_ids: z.array(uuid).max(200) }).strict()
+});
+
+const applicationWorkflowCreateSchema = z.object({
+  body: z.object({
+    code: workflowCode,
+    name: z.string().trim().min(2).max(150),
+    description: z.string().trim().max(500).optional()
+  }).strict()
+});
+
+const applicationWorkflowUpdateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    name: z.string().trim().min(2).max(150).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one field is required.'
+  )
+});
+
+const workflowAssignee = z.object({
+  type: z.enum(['ROLE', 'GROUP', 'USER']),
+  value: z.string().trim().min(1).max(100)
+}).strict().superRefine((assignee, context) => {
+  if (assignee.type === 'ROLE' && !ROLES.includes(assignee.value)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['value'],
+      message: 'Unknown system role.'
+    });
+  }
+  if (['GROUP', 'USER'].includes(assignee.type) && !z.uuid().safeParse(assignee.value).success) {
+    context.addIssue({
+      code: 'custom',
+      path: ['value'],
+      message: `${assignee.type.toLowerCase()} assignee must be a UUID.`
+    });
+  }
+});
+
+const workflowStage = z.object({
+  code: workflowCode,
+  name: z.string().trim().min(2).max(150),
+  description: z.string().trim().max(500).optional(),
+  allow_submitter_action: z.boolean().default(false),
+  require_different_actor: z.boolean().default(true),
+  sla_hours: z.number().int().min(1).max(8760).nullable().optional(),
+  assignees: z.array(workflowAssignee).min(1).max(20)
+}).strict();
+
+const applicationWorkflowVersionCreateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    stages: z.array(workflowStage).min(1).max(20)
+  }).strict().superRefine((body, context) => {
+    const codes = body.stages.map((stage) => stage.code);
+    if (new Set(codes).size !== codes.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['stages'],
+        message: 'Stage codes must be unique.'
+      });
+    }
+  })
+});
+
+const applicationWorkflowVersionIdSchema = z.object({
+  params: z.object({ id: uuid, versionId: uuid })
+});
+
+const workflowTaskListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    ...paginationQuery
+  }).strict()
+});
+
+const visitorWorkflowActionSchema = z.object({
+  params: z.object({ reference: applicationReference }),
+  body: z.object({
+    action: z.enum(['APPROVE', 'REJECT']),
+    notes: z.string().trim().min(3).max(2000).optional()
+  }).strict().refine(
+    (body) => body.action !== 'REJECT' || Boolean(body.notes),
+    { path: ['notes'], message: 'Rejection notes are required.' }
+  )
+});
+
+const notificationEmailCategoryUpdateSchema = z.object({
+  params: z.object({ code: workflowCode }),
+  body: z.object({
+    email_enabled: z.boolean()
+  }).strict()
+});
+
+const notificationTemplateListSchema = z.object({
+  query: z.object({
+    category_code: workflowCode.optional(),
+    is_active: z.enum(['true', 'false', '1', '0']).transform(
+      (value) => value === 'true' || value === '1'
+    ).optional(),
+    ...paginationQuery
+  }).strict()
+});
+
+const notificationTemplateCreateSchema = z.object({
+  body: z.object({
+    code: workflowCode,
+    category_code: workflowCode,
+    name: z.string().trim().min(2).max(150),
+    title_template: z.string().trim().min(2).max(255),
+    body_template: z.string().trim().min(2).max(5000),
+    default_priority: z.enum(['LOW', 'NORMAL', 'HIGH', 'CRITICAL']).default('NORMAL'),
+    is_active: z.boolean().default(true)
+  }).strict()
+});
+
+const notificationTemplateUpdateSchema = z.object({
+  params: z.object({ code: workflowCode }),
+  body: z.object({
+    category_code: workflowCode.optional(),
+    name: z.string().trim().min(2).max(150).optional(),
+    title_template: z.string().trim().min(2).max(255).optional(),
+    body_template: z.string().trim().min(2).max(5000).optional(),
+    default_priority: z.enum(['LOW', 'NORMAL', 'HIGH', 'CRITICAL']).optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one template field is required.'
+  )
+});
+
 const validate = (schema) => (req, res, next) => {
   const result = schema.safeParse({ body: req.body, params: req.params, query: req.query });
 
@@ -731,6 +894,19 @@ module.exports = {
     accountUpdate: accountUpdateSchema,
     passwordChange: passwordChangeSchema,
     passwordResetRequest: passwordResetRequestSchema,
-    passwordResetConfirm: passwordResetConfirmSchema
+    passwordResetConfirm: passwordResetConfirmSchema,
+    workflowGroupCreate: workflowGroupCreateSchema,
+    workflowGroupUpdate: workflowGroupUpdateSchema,
+    workflowGroupMembers: workflowGroupMembersSchema,
+    applicationWorkflowCreate: applicationWorkflowCreateSchema,
+    applicationWorkflowUpdate: applicationWorkflowUpdateSchema,
+    applicationWorkflowVersionCreate: applicationWorkflowVersionCreateSchema,
+    applicationWorkflowVersionId: applicationWorkflowVersionIdSchema,
+    workflowTaskList: workflowTaskListSchema,
+    visitorWorkflowAction: visitorWorkflowActionSchema,
+    notificationEmailCategoryUpdate: notificationEmailCategoryUpdateSchema,
+    notificationTemplateList: notificationTemplateListSchema,
+    notificationTemplateCreate: notificationTemplateCreateSchema,
+    notificationTemplateUpdate: notificationTemplateUpdateSchema
   }
 };

@@ -14,10 +14,17 @@ const applicationSelect = `
            ELSE 'UNAVAILABLE'
          END AS card_status,
          a.reviewed_by AS reviewed_by_id,
-         COALESCE(reviewer.full_name, reviewer.user_name) AS reviewed_by
+         COALESCE(reviewer.full_name, reviewer.user_name) AS reviewed_by,
+         workflow_instance.status AS workflow_status,
+         workflow_stage.code AS current_workflow_stage_code,
+         workflow_stage.name AS current_workflow_stage_name
   FROM visitor_applications a
   INNER JOIN avsec_visitors v ON v.id = a.visitor_id
   LEFT JOIN user_profiles reviewer ON reviewer.id = a.reviewed_by
+  LEFT JOIN application_workflow_instances workflow_instance
+    ON workflow_instance.application_id = a.id
+  LEFT JOIN application_workflow_stages workflow_stage
+    ON workflow_stage.id = workflow_instance.current_stage_id
   LEFT JOIN access_cards c ON c.current_application_id = a.id
   LEFT JOIN card_access_levels card_level ON card_level.code = c.access_level
   LEFT JOIN card_categories card_category ON card_category.code = c.category`;

@@ -36,6 +36,8 @@ const createSessionToken = async (userId) => {
 test('internal application, card, account, user list and refresh workflows', async () => {
   const server = await listen();
   const adminId = uuidv4();
+  const managerId = uuidv4();
+  const supervisorId = uuidv4();
   const assistantId = uuidv4();
   let cardId;
   const identityNumber = `OPS${Date.now()}`;
@@ -59,6 +61,30 @@ test('internal application, card, account, user list and refresh workflows', asy
     await db.execute(
       `INSERT INTO user_profiles
        (id, user_name, email, password_hash, full_name, department, user_role, is_active)
+       VALUES (?, ?, ?, ?, ?, 'Aviation Security', 'admin', 1)`,
+      [
+        managerId,
+        `ops.manager.${managerId.slice(0, 8)}`,
+        `${managerId}@example.test`,
+        passwordHash,
+        'Operations Manager'
+      ]
+    );
+    await db.execute(
+      `INSERT INTO user_profiles
+       (id, user_name, email, password_hash, full_name, department, user_role, is_active)
+       VALUES (?, ?, ?, ?, ?, 'Aviation Security', 'supervisor', 1)`,
+      [
+        supervisorId,
+        `ops.supervisor.${supervisorId.slice(0, 8)}`,
+        `${supervisorId}@example.test`,
+        passwordHash,
+        'Operations Supervisor'
+      ]
+    );
+    await db.execute(
+      `INSERT INTO user_profiles
+       (id, user_name, email, password_hash, full_name, department, user_role, is_active)
        VALUES (?, ?, ?, ?, ?, 'Aviation Security', 'security_assistant', 1)`,
       [
         assistantId,
@@ -69,6 +95,8 @@ test('internal application, card, account, user list and refresh workflows', asy
       ]
     );
     const adminSession = await createSessionToken(adminId);
+    const managerSession = await createSessionToken(managerId);
+    const supervisorSession = await createSessionToken(supervisorId);
     const assistantSession = await createSessionToken(assistantId);
     const { port } = server.address();
     const baseUrl = `http://127.0.0.1:${port}/api`;
@@ -105,6 +133,21 @@ test('internal application, card, account, user list and refresh workflows', asy
     const createdApplication = (await created.json()).application;
     applicationId = createdApplication.id;
     assert.equal(createdApplication.status, 'SUBMITTED');
+    assert.equal(createdApplication.current_workflow_stage_code, 'MANAGER_REVIEW');
+
+    const submitterTasks = await fetch(
+      `${baseUrl}/workflow-tasks/mine?search=${identityNumber}`,
+      { headers }
+    );
+    assert.equal(submitterTasks.status, 200);
+    assert.equal((await submitterTasks.json()).pagination.total, 0);
+
+    const managerTasks = await fetch(
+      `${baseUrl}/workflow-tasks/mine?search=${identityNumber}`,
+      { headers: { authorization: `Bearer ${managerSession.token}` } }
+    );
+    assert.equal(managerTasks.status, 200);
+    assert.equal((await managerTasks.json()).pagination.total, 1);
 
     const listed = await fetch(
       `${baseUrl}/visitor-applications?search=${identityNumber}&status=SUBMITTED&page=1&page_size=10`,
@@ -135,15 +178,57 @@ test('internal application, card, account, user list and refresh workflows', asy
     const card = (await createdCard.json()).card;
     cardId = card.id;
 
-    const approved = await fetch(
+    const managerApproved = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/decision`,
       {
         method: 'PATCH',
-        headers,
+        headers: {
+          authorization: `Bearer ${managerSession.token}`,
+          'content-type': 'application/json'
+        },
         body: JSON.stringify({ decision: 'APPROVED', notes: 'Verified for card test.' })
       }
     );
-    assert.equal(approved.status, 200);
+    assert.equal(managerApproved.status, 200);
+    assert.equal((await managerApproved.json()).status, 'UNDER_REVIEW');
+
+    const supervisorApproved = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${supervisorSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'APPROVE', notes: 'Senior security verified.' })
+      }
+    );
+    assert.equal(supervisorApproved.status, 200);
+    assert.equal((await supervisorApproved.json()).workflow.status, 'UNDER_REVIEW');
+
+    const facilitationApproved = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${assistantSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'APPROVE', notes: 'Facilitation completed.' })
+      }
+    );
+    assert.equal(facilitationApproved.status, 200);
+    assert.equal((await facilitationApproved.json()).workflow.status, 'APPROVED');
+
+    const workflowHistory = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow`,
+      { headers }
+    );
+    assert.equal(workflowHistory.status, 200);
+    const workflow = (await workflowHistory.json()).workflow;
+    assert.equal(workflow.status, 'APPROVED');
+    assert.equal(workflow.stages.length, 3);
+    assert.equal(workflow.actions.length, 3);
 
     const assigned = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/card-assignment`,
@@ -236,9 +321,16 @@ test('internal application, card, account, user list and refresh workflows', asy
     }
     await db.execute(
       `DELETE FROM audit_events
-       WHERE actor_id IN (?, ?)
+       WHERE actor_id IN (?, ?, ?, ?)
           OR resource_id IN (?, ?)`,
-      [adminId, assistantId, applicationId || '', cardId || '']
+      [
+        adminId,
+        managerId,
+        supervisorId,
+        assistantId,
+        applicationId || '',
+        cardId || ''
+      ]
     );
     if (applicationId) {
       await db.execute('DELETE FROM card_events WHERE application_id = ?', [applicationId]);
@@ -251,8 +343,14 @@ test('internal application, card, account, user list and refresh workflows', asy
       await db.execute('DELETE FROM access_cards WHERE id = ?', [cardId]);
     }
     await db.execute('DELETE FROM avsec_visitors WHERE identity_number = ?', [identityNumber]);
-    await db.execute('DELETE FROM auth_tokens WHERE user_id IN (?, ?)', [adminId, assistantId]);
-    await db.execute('DELETE FROM user_profiles WHERE id IN (?, ?)', [adminId, assistantId]);
+    await db.execute(
+      'DELETE FROM auth_tokens WHERE user_id IN (?, ?, ?, ?)',
+      [adminId, managerId, supervisorId, assistantId]
+    );
+    await db.execute(
+      'DELETE FROM user_profiles WHERE id IN (?, ?, ?, ?)',
+      [adminId, managerId, supervisorId, assistantId]
+    );
     await close(server);
   }
 });

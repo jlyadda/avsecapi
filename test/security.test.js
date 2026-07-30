@@ -153,6 +153,7 @@ test('visitor application completes approval, check-in and check-out', async () 
   const server = await listen();
   const assistantId = uuidv4();
   const adminId = uuidv4();
+  const supervisorId = uuidv4();
   const identityNumber = `TEST${Date.now()}`;
   const sessionIds = [];
   let applicationId;
@@ -173,9 +174,22 @@ test('visitor application completes approval, check-in and check-out', async () 
        VALUES (?, ?, ?, ?, ?, 'Aviation Security', 'admin', 1)`,
       [adminId, `admin.${adminId.slice(0, 8)}`, `${adminId}@example.test`, 'unused', 'Test Admin']
     );
+    await db.execute(
+      `INSERT INTO user_profiles
+       (id, user_name, email, password_hash, full_name, department, user_role, is_active)
+       VALUES (?, ?, ?, ?, ?, 'Aviation Security', 'supervisor', 1)`,
+      [
+        supervisorId,
+        `supervisor.${supervisorId.slice(0, 8)}`,
+        `${supervisorId}@example.test`,
+        'unused',
+        'Test Supervisor'
+      ]
+    );
     const reviewerSession = await createSessionToken(adminId);
+    const supervisorSession = await createSessionToken(supervisorId);
     const assistantSession = await createSessionToken(assistantId);
-    sessionIds.push(reviewerSession.jti, assistantSession.jti);
+    sessionIds.push(reviewerSession.jti, supervisorSession.jti, assistantSession.jti);
 
     const { port } = server.address();
     const baseUrl = `http://127.0.0.1:${port}/api`;
@@ -278,6 +292,34 @@ test('visitor application completes approval, check-in and check-out', async () 
       body: JSON.stringify({ decision: 'APPROVED', notes: 'Identity verified.' })
     });
     assert.equal(approved.status, 200);
+    assert.equal((await approved.json()).status, 'UNDER_REVIEW');
+
+    const seniorApproved = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${supervisorSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'APPROVE', notes: 'Senior security verified.' })
+      }
+    );
+    assert.equal(seniorApproved.status, 200);
+
+    const finalApproved = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${assistantSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'APPROVE', notes: 'Facilitation desk completed.' })
+      }
+    );
+    assert.equal(finalApproved.status, 200);
+    assert.equal((await finalApproved.json()).workflow.status, 'APPROVED');
 
     const vehicleApplicationResponse = await fetch(
       `${baseUrl}/public/vehicle-access-applications`,
@@ -388,6 +430,7 @@ test('visitor application completes approval, check-in and check-out', async () 
       await db.execute('DELETE FROM external_api_keys WHERE id = ?', [vehicleApiKeyId]);
     }
     await db.execute('DELETE FROM user_profiles WHERE id = ?', [assistantId]);
+    await db.execute('DELETE FROM user_profiles WHERE id = ?', [supervisorId]);
     await db.execute('DELETE FROM user_profiles WHERE id = ?', [adminId]);
     await close(server);
   }

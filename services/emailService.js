@@ -1,6 +1,6 @@
 const nodemailer = require('nodemailer');
 require('dotenv').config({ quiet: true });
-const config = require('./config');
+const config = require('../config');
 
 const gmailUser = (process.env.gmailUser || process.env.GMAIL_USER || '').trim();
 const gmailAppPassword = (

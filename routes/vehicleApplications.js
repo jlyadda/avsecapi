@@ -10,7 +10,7 @@ const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
 const { PERMISSIONS } = require('../permissions');
 const { recordAudit, sendError } = require('../audit');
-const { createSystemNotification } = require('../notificationService');
+const { createSystemNotification } = require('../services/notificationService');
 
 const router = express.Router();
 

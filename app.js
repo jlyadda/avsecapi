@@ -17,6 +17,10 @@ const readinessRoutes = require('./routes/readiness');
 const cardTaxonomyRoutes = require('./routes/cardTaxonomy');
 const notificationRoutes = require('./routes/notifications');
 const notificationGroupRoutes = require('./routes/notificationGroups');
+const notificationSettingsRoutes = require('./routes/notificationSettings');
+const notificationTemplateRoutes = require('./routes/notificationTemplates');
+const applicationWorkflowRoutes = require('./routes/applicationWorkflows');
+const applicationWorkflowAdminRoutes = require('./routes/applicationWorkflowAdmin');
 const { apiLimiter } = require('./rateLimits');
 
 const app = express();
@@ -31,7 +35,7 @@ app.use(cors({
     if (!origin) return callback(null, true);
     return callback(null, allowedOrigins.has(origin.replace(/\/$/, '')));
   },
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Authorization', 'Content-Type', 'X-API-Key', 'X-Request-Id'],
   exposedHeaders: ['X-Request-Id'],
   credentials: true,
@@ -56,6 +60,10 @@ app.use(
   cardTaxonomyRoutes,
   notificationRoutes,
   notificationGroupRoutes,
+  notificationSettingsRoutes,
+  notificationTemplateRoutes,
+  applicationWorkflowRoutes,
+  applicationWorkflowAdminRoutes,
   visitorRoutes,
   userRoutes
 );

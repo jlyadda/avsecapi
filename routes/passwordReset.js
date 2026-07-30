@@ -8,7 +8,10 @@ const {
   passwordResetRequestLimiter,
   passwordResetConfirmLimiter
 } = require('../rateLimits');
-const { isEmailConfigured, sendPasswordResetOtp } = require('../emailService');
+const {
+  isEmailConfigured,
+  sendPasswordResetOtp
+} = require('../services/emailService');
 const { generateOtp, hashOtp, otpMatches } = require('../passwordResetOtp');
 
 const router = express.Router();

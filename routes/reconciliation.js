@@ -5,7 +5,7 @@ const { authenticateToken, authorizePermission } = require('../middleware');
 const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { recordAudit, sendError } = require('../audit');
-const { snapshotSelect, snapshotParameters } = require('../cardSnapshot');
+const { snapshotSelect, snapshotParameters } = require('../services/cardSnapshot');
 
 const router = express.Router();
 

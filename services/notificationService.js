@@ -185,13 +185,29 @@ const createSystemNotification = async (
   }
 ) => {
   const [rows] = await executor.execute(
-    `SELECT code, title_template, body_template, default_priority
-     FROM notification_templates
-     WHERE code = ? AND is_active = 1`,
+    `SELECT template.code, template.title_template, template.body_template,
+            template.default_priority, category.email_enabled
+     FROM notification_templates template
+     INNER JOIN notification_email_categories category
+       ON category.code = template.category_code
+     WHERE template.code = ?
+       AND template.is_active = 1
+       AND category.is_active = 1`,
     [templateCode]
   );
   const template = rows[0];
   if (!template) throw new Error(`Notification template ${templateCode} is unavailable.`);
+  const effectiveChannels = channels.filter(
+    (channel) => channel !== 'EMAIL' || Boolean(template.email_enabled)
+  );
+  if (effectiveChannels.length === 0) {
+    return {
+      id: null,
+      recipientCount: 0,
+      externalEmailCount: 0,
+      emailDisabled: true
+    };
+  }
   return createNotification(executor, {
     source: 'SYSTEM',
     type: template.code,
@@ -202,7 +218,7 @@ const createSystemNotification = async (
     resourceType,
     resourceId,
     targets,
-    channels,
+    channels: effectiveChannels,
     metadata
   });
 };

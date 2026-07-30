@@ -1,4 +1,7 @@
-const { isEmailConfigured, verifyEmailTransport } = require('../emailService');
+const {
+  isEmailConfigured,
+  verifyEmailTransport
+} = require('../services/emailService');
 
 const verify = async () => {
   if (!isEmailConfigured) {

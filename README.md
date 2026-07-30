@@ -397,12 +397,15 @@ Invalid, expired, consumed, or locked codes return the same `400` error.
 ### Application statuses
 
 ```text
-SUBMITTED ──► APPROVED ──► CHECKED_IN ──► CHECKED_OUT
-    │
-    └──────► REJECTED
+SUBMITTED ──► UNDER_REVIEW ──► APPROVED ──► CHECKED_IN ──► CHECKED_OUT
+    │               │
+    └───────────────┴──────► REJECTED
 ```
 
-The internal API does not allow arbitrary status updates. Clients must use the decision, check-in, and check-out action routes.
+`SUBMITTED` means the first workflow stage is active. `UNDER_REVIEW` means at
+least one stage approved the application and another stage is pending. The
+internal API does not allow arbitrary status updates. Clients must use workflow
+action, check-in, and check-out routes.
 
 ### `GET /api/visitor-applications`
 
@@ -531,11 +534,14 @@ Possible errors:
 
 ### `PATCH /api/visitor-applications/:reference/decision`
 
-Approves or rejects a submitted application.
+Deprecated compatibility route. It records one decision against the current
+workflow stage; it no longer grants final approval in one request. New clients
+must use `POST /api/visitor-applications/:reference/workflow/actions`.
 
 **Allowed roles:** `supervisor`, `admin`, `super_admin`
 
-Only applications currently in `SUBMITTED` status can be reviewed.
+The caller must be assigned to the current stage. A stage approval returns
+`UNDER_REVIEW` until the final configured stage approves.
 
 **Approve**
 
@@ -564,17 +570,179 @@ Validation:
 
 ```json
 {
-  "status": "APPROVED",
-  "message": "Application decision recorded."
+  "application": {},
+  "status": "UNDER_REVIEW",
+  "message": "Stage decision recorded and application moved to the next stage."
 }
 ```
 
 Possible errors:
 
 - `404`: application not found
-- `409`: application has already moved out of `SUBMITTED`
+- `403 WORKFLOW_STAGE_NOT_ASSIGNED`: current stage is not assigned to the caller
+- `403 WORKFLOW_SELF_APPROVAL_FORBIDDEN`: caller submitted the application
+- `403 WORKFLOW_SEPARATION_OF_DUTIES`: caller approved an earlier protected stage
+- `409 WORKFLOW_NOT_ACTIVE`: application has no active review stage
 
-Recording a decision does not currently send a notification.
+## Visitor Approval Workflows
+
+Workflow authorization is separate from login roles. Login roles grant API
+permissions; workflow groups and stage assignees determine who may decide a
+specific stage.
+
+The seeded workflow is:
+
+1. `MANAGER_REVIEW` — `MANAGERS` group or `admin` role
+2. `SENIOR_SECURITY_REVIEW` — `PSO` group, `SSO` group, or `supervisor` role
+3. `FACILITATION_DESK` — `FACILITATION_DESK` group or `security_assistant` role
+
+Each stage uses `ANY_ONE`: one eligible officer approves or rejects it. Default
+stages prohibit self-approval and require a different officer from officers who
+approved earlier stages. Rejection ends the workflow immediately; approval at
+the last stage sets the application to `APPROVED`.
+
+Applications retain the workflow version active when they were submitted.
+Activating a new version affects only later applications.
+
+### `GET /api/workflow-tasks/mine`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
+
+Returns active stages the current user is eligible to complete. Supports
+`search`, `page`, and `page_size`. Search covers application number, visitor
+name, identity number, and company.
+
+```json
+{
+  "tasks": [
+    {
+      "application_id": "uuid",
+      "application_number": "AVSEC-20260729-A1B2C3D4",
+      "application_status": "UNDER_REVIEW",
+      "stage_code": "SENIOR_SECURITY_REVIEW",
+      "stage_name": "PSO or SSO Review",
+      "sequence_number": 2,
+      "activated_at": "2026-07-29T08:00:00.000Z",
+      "due_at": "2026-07-30T08:00:00.000Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 1,
+    "total_pages": 1
+  }
+}
+```
+
+Self-submitted tasks and stages that violate separation of duties are excluded.
+
+### `POST /api/visitor-applications/:reference/workflow/actions`
+
+**Allowed roles:** users with workflow task access who are assigned to the
+current stage
+
+```json
+{
+  "action": "APPROVE",
+  "notes": "Identity and supporting documents verified."
+}
+```
+
+`action` is `APPROVE` or `REJECT`. Notes are optional for approval and required
+for rejection.
+
+```json
+{
+  "application": {},
+  "workflow": {
+    "status": "UNDER_REVIEW",
+    "completed": false,
+    "current_stage": {
+      "code": "SENIOR_SECURITY_REVIEW",
+      "name": "PSO or SSO Review"
+    }
+  }
+}
+```
+
+The transaction locks the application and workflow instance, records an
+append-only action and audit event, activates the next stage, and creates
+notifications for its assignees. Final approval or rejection emails the
+external applicant.
+
+### `GET /api/visitor-applications/:reference/workflow`
+
+**Allowed roles:** all internal roles that can view visitor applications
+
+Returns the fixed workflow version, ordered stage history, reviewer display
+names, notes, timestamps, request IDs, and append-only actions.
+
+### Workflow Group Administration
+
+**Allowed role:** `super_admin`
+
+- `GET /api/workflow-groups` — list groups and active members
+- `POST /api/workflow-groups` — create an operational group
+- `PATCH /api/workflow-groups/:id` — update name, description, or active state
+- `PUT /api/workflow-groups/:id/members` — atomically replace members
+
+```json
+{
+  "code": "TERMINAL_MANAGERS",
+  "name": "Terminal Managers",
+  "description": "Managers responsible for terminal access",
+  "user_ids": ["user-uuid"]
+}
+```
+
+Only active users may be members. Disabling a group immediately removes its
+members from task eligibility without altering historical records.
+
+### Workflow Version Administration
+
+**Allowed role:** `super_admin`
+
+- `GET /api/application-workflows` — list workflows and versions
+- `POST /api/application-workflows` — create a workflow container
+- `PATCH /api/application-workflows/:id` — update metadata or active state
+- `POST /api/application-workflows/:id/versions` — create a complete draft
+- `POST /api/application-workflows/:id/versions/:versionId/activate` — activate a draft
+
+Create a draft version:
+
+```json
+{
+  "stages": [
+    {
+      "code": "MANAGER_REVIEW",
+      "name": "Manager Review",
+      "description": "Initial management review",
+      "allow_submitter_action": false,
+      "require_different_actor": true,
+      "sla_hours": 24,
+      "assignees": [
+        {
+          "type": "GROUP",
+          "value": "workflow-group-uuid"
+        },
+        {
+          "type": "ROLE",
+          "value": "admin"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Stages execute in array order. Assignee types are `ROLE`, `GROUP`, and `USER`.
+Group and user values must be UUIDs; role values must be known system roles.
+Every stage needs at least one assignee.
+
+Versions are immutable after activation. To change a live workflow, create and
+activate a new draft. Activation retires the previously active visitor workflow
+version atomically and is audited.
 
 ### `POST /api/visitor-applications/:reference/check-in`
 
@@ -1385,3 +1553,73 @@ The API uses standard rate-limit response headers. In a multi-instance deploymen
 No frontend-blocking internal route gaps are currently documented. Internal
 applications must continue to use authenticated API routes and must not query
 the database directly.
+## System Email Category Settings
+
+System notification email delivery can be enabled or disabled per category
+without affecting in-app delivery.
+
+### `GET /api/notification-settings/email-categories`
+
+**Allowed role:** `super_admin`
+
+Returns notification categories with their code, description, active state,
+and `email_enabled` state.
+
+### `PATCH /api/notification-settings/email-categories/:code`
+
+**Allowed role:** `super_admin`
+
+```json
+{
+  "email_enabled": false
+}
+```
+
+Changes are audited. When email is disabled, every template in that category
+continues to create in-app deliveries when `IN_APP` was requested, but email is
+suppressed. Email-only triggers are skipped without rolling back the business
+transaction. Administrator-created broadcasts are not affected by category
+settings unless they use the template delivery service.
+
+## Notification Email Templates
+
+Admins and super admins can create reusable email templates under an active
+notification category.
+
+### `GET /api/notification-email-templates`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Supports `category_code`, `is_active`, `page`, and `page_size`. Each template
+includes category details, email-enabled state, priority, system/custom status,
+creator, and timestamps.
+
+### `POST /api/notification-email-templates`
+
+**Allowed roles:** `admin`, `super_admin`
+
+```json
+{
+  "code": "ACCESS_CARD_RETURN_REMINDER",
+  "category_code": "ACCESS_CARDS",
+  "name": "Access card return reminder",
+  "title_template": "Return access card {{number}}",
+  "body_template": "Please return card {{number}} before {{deadline}}.",
+  "default_priority": "HIGH",
+  "is_active": true
+}
+```
+
+Template codes are immutable uppercase identifiers. Placeholder names use
+double braces and are rendered when the template is invoked.
+
+### `PATCH /api/notification-email-templates/:code`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Admins can update custom templates. Only super admins can update seeded system
+templates. Editable fields are category, name, title/body templates, default
+priority, and active state. All changes are audited.
+
+When a category is disabled, email is suppressed for all templates assigned to
+it while requested in-app notifications remain available.

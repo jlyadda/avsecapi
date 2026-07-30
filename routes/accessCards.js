@@ -6,7 +6,7 @@ const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { findApplication } = require('./applicationHelpers');
 const { recordAudit } = require('../audit');
-const { createSystemNotification } = require('../notificationService');
+const { createSystemNotification } = require('../services/notificationService');
 
 const router = express.Router();
 

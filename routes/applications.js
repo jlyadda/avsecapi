@@ -7,7 +7,11 @@ const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
 const { applicationSelect, findApplication } = require('./applicationHelpers');
 const { recordAudit } = require('../audit');
-const { createSystemNotification } = require('../notificationService');
+const { createSystemNotification } = require('../services/notificationService');
+const {
+  executeVisitorWorkflowAction,
+  startVisitorWorkflow
+} = require('../services/workflowService');
 
 const router = express.Router();
 
@@ -110,26 +114,21 @@ router.post(
           req.apiClient.keyFingerprint
         ]
       );
+      await startVisitorWorkflow(
+        connection,
+        {
+          id: applicationId,
+          application_number: applicationNumber,
+          personal_email: body.personal_email
+        },
+        req.requestId
+      );
       await recordAudit(connection, {
         action: 'VISITOR_APPLICATION_SUBMITTED',
         resourceType: 'visitor_application',
         resourceId: applicationId,
         requestId: req.requestId,
         metadata: { application_number: applicationNumber, source: 'external_api_key' }
-      });
-      await createSystemNotification(connection, {
-        templateCode: 'VISITOR_APPLICATION_SUBMITTED',
-        values: { reference: applicationNumber },
-        requestId: req.requestId,
-        resourceType: 'visitor_application',
-        resourceId: applicationId,
-        targets: [
-          { type: 'ROLE', value: 'supervisor' },
-          { type: 'ROLE', value: 'admin' },
-          { type: 'ROLE', value: 'super_admin' }
-        ],
-        channels: ['IN_APP', 'EMAIL'],
-        metadata: { application_number: applicationNumber }
       });
 
       await connection.commit();
@@ -288,8 +287,10 @@ router.post(
          (id, application_number, visitor_id, personal_email, personal_phone,
           alternative_personal_phone, identity_expiry_date, company_name, company_position,
           company_address, company_phone, company_email, areas_of_access,
-          supporting_documents, visit_reasons, visit_starts, visit_ends, source_key_hash, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTERNAL_STAFF', 'SUBMITTED')`,
+          supporting_documents, visit_reasons, visit_starts, visit_ends, source_key_hash,
+          submitted_by, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 'INTERNAL_STAFF', ?, 'SUBMITTED')`,
         [
           applicationId,
           applicationNumber,
@@ -307,8 +308,18 @@ router.post(
           JSON.stringify(documents),
           JSON.stringify(body.visit_reasons),
           body.visit_starts,
-          body.visit_ends
+          body.visit_ends,
+          req.user.id
         ]
+      );
+      await startVisitorWorkflow(
+        connection,
+        {
+          id: applicationId,
+          application_number: applicationNumber,
+          personal_email: body.personal_email
+        },
+        req.requestId
       );
       await recordAudit(connection, {
         actorId: req.user.id,
@@ -317,20 +328,6 @@ router.post(
         resourceId: applicationId,
         requestId: req.requestId,
         metadata: { application_number: applicationNumber, source: 'internal_staff' }
-      });
-      await createSystemNotification(connection, {
-        templateCode: 'VISITOR_APPLICATION_SUBMITTED',
-        values: { reference: applicationNumber },
-        requestId: req.requestId,
-        resourceType: 'visitor_application',
-        resourceId: applicationId,
-        targets: [
-          { type: 'ROLE', value: 'supervisor' },
-          { type: 'ROLE', value: 'admin' },
-          { type: 'ROLE', value: 'super_admin' }
-        ],
-        channels: ['IN_APP', 'EMAIL'],
-        metadata: { application_number: applicationNumber }
       });
 
       await connection.commit();
@@ -384,53 +381,62 @@ router.patch(
         await connection.rollback();
         return res.status(404).json({ error: 'Application not found.' });
       }
-      if (application.status !== 'SUBMITTED') {
-        await connection.rollback();
-        return res.status(409).json({
-          error: `Application cannot be reviewed from ${application.status}.`
-        });
-      }
-      await connection.execute(
-        `UPDATE visitor_applications
-         SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = NOW()
-         WHERE id = ?`,
-        [
-          req.body.decision,
-          req.body.notes || null,
-          req.user.id,
-          application.id
-        ]
-      );
+      const result = await executeVisitorWorkflowAction(connection, {
+        application,
+        user: req.user,
+        action: req.body.decision === 'APPROVED' ? 'APPROVE' : 'REJECT',
+        notes: req.body.notes,
+        requestId: req.requestId
+      });
       await recordAudit(connection, {
         actorId: req.user.id,
-        action: `VISITOR_APPLICATION_${req.body.decision}`,
+        action: `VISITOR_WORKFLOW_STAGE_${
+          req.body.decision === 'APPROVED' ? 'APPROVE' : 'REJECT'
+        }`,
         resourceType: 'visitor_application',
         resourceId: application.id,
         requestId: req.requestId,
-        metadata: { application_number: application.application_number }
-      });
-      await createSystemNotification(connection, {
-        templateCode: 'VISITOR_APPLICATION_DECIDED',
-        values: {
-          reference: application.application_number,
-          decision: req.body.decision.toLowerCase()
-        },
-        requestId: req.requestId,
-        resourceType: 'visitor_application',
-        resourceId: application.id,
-        targets: [
-          { type: 'EXTERNAL_EMAIL', value: application.personal_email }
-        ],
-        channels: ['EMAIL'],
         metadata: {
           application_number: application.application_number,
-          decision: req.body.decision
+          stage: result.actedStage.code,
+          resulting_status: result.status,
+          legacy_endpoint: true
         }
       });
+      if (result.completed) {
+        await createSystemNotification(connection, {
+          templateCode: 'VISITOR_WORKFLOW_COMPLETED',
+          values: {
+            reference: application.application_number,
+            decision: result.status.toLowerCase()
+          },
+          requestId: req.requestId,
+          resourceType: 'visitor_application',
+          resourceId: application.id,
+          targets: [
+            { type: 'EXTERNAL_EMAIL', value: application.personal_email }
+          ],
+          channels: ['EMAIL'],
+          metadata: {
+            application_number: application.application_number,
+            decision: result.status
+          }
+        });
+      }
       await connection.commit();
-      return res.json({ status: req.body.decision, message: 'Application decision recorded.' });
+      const updatedApplication = await findApplication(db, application.id);
+      return res.json({
+        application: updatedApplication,
+        status: result.status,
+        message: result.completed
+          ? 'Application workflow completed.'
+          : 'Stage decision recorded and application moved to the next stage.'
+      });
     } catch (error) {
       await connection.rollback();
+      if (error.status) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
       console.error(error);
       return res.status(500).json({ error: 'Unable to review visitor application.' });
     } finally {

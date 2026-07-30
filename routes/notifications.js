@@ -3,7 +3,7 @@ const db = require('../db');
 const { authenticateToken, authorizePermission } = require('../middleware');
 const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
-const { createNotification } = require('../notificationService');
+const { createNotification } = require('../services/notificationService');
 const { recordAudit, sendError } = require('../audit');
 
 const router = express.Router();

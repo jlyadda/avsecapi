@@ -5,7 +5,7 @@ const { initializeDatabase } = require('./databaseInitializer');
 const {
   startNotificationWorker,
   stopNotificationWorker
-} = require('./notificationWorker');
+} = require('./services/notificationWorker');
 
 let server;
 
