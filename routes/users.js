@@ -93,8 +93,10 @@ router.patch(
       await db.execute('UPDATE user_profiles SET is_active = ? WHERE id = ?', [req.body.is_active, target.id]);
       if (!req.body.is_active) {
         await db.execute(
-          'UPDATE auth_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL',
-          [target.id]
+          `UPDATE auth_tokens
+           SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'ACCOUNT_DEACTIVATED'
+           WHERE user_id = ? AND revoked_at IS NULL`,
+          [req.user.id, target.id]
         );
       }
 
@@ -121,8 +123,10 @@ router.patch(
 
       await db.execute('UPDATE user_profiles SET user_role = ? WHERE id = ?', [req.body.role, target.id]);
       await db.execute(
-        'UPDATE auth_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL',
-        [target.id]
+        `UPDATE auth_tokens
+         SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'ROLE_CHANGED'
+         WHERE user_id = ? AND revoked_at IS NULL`,
+        [req.user.id, target.id]
       );
 
       return res.json({ message: 'User role updated; existing sessions were revoked.' });
@@ -147,8 +151,10 @@ router.post(
       }
 
       const [result] = await db.execute(
-        'UPDATE auth_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL',
-        [target.id]
+        `UPDATE auth_tokens
+         SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'ADMIN_REVOKED_ALL'
+         WHERE user_id = ? AND revoked_at IS NULL`,
+        [req.user.id, target.id]
       );
       return res.json({ message: 'User sessions revoked.', revokedSessions: result.affectedRows });
     } catch (error) {

@@ -31,7 +31,9 @@ const PERMISSIONS = Object.freeze({
   MANAGE_API_KEYS: 'api-keys:manage',
   VIEW_ADMIN_STATS: 'admin:stats:view',
   MANAGE_USERS: 'users:manage',
-  MANAGE_ROLES: 'roles:manage'
+  MANAGE_ROLES: 'roles:manage',
+  VIEW_SYSTEM_SESSIONS: 'system-sessions:view',
+  MANAGE_SYSTEM_SESSIONS: 'system-sessions:manage'
 });
 
 const rolePermissions = Object.freeze({

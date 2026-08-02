@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('../db');
 
 const router = express.Router();
-const requiredMigration = '018_approved_visitors.sql';
+const requiredMigration = '019_system_session_monitoring.sql';
 
 router.get('/ready', async (req, res) => {
   try {

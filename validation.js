@@ -847,6 +847,24 @@ const approvedVisitorCardReturnSchema = z.object({
   body: z.object({}).strict()
 });
 
+const systemSessionListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    status: z.enum(['ACTIVE', 'REVOKED', 'EXPIRED', 'ALL']).default('ACTIVE'),
+    role: z.enum(ROLES).optional(),
+    user_id: uuid.optional(),
+    ip_address: z.string().trim().max(45).optional(),
+    ...paginationQuery
+  }).strict()
+});
+
+const systemSessionRevokeSchema = z.object({
+  params: z.object({ jti: uuid }),
+  body: z.object({
+    reason: z.string().trim().min(3).max(200).optional()
+  }).strict()
+});
+
 const validate = (schema) => (req, res, next) => {
   const result = schema.safeParse({ body: req.body, params: req.params, query: req.query });
 
@@ -937,6 +955,8 @@ module.exports = {
     approvedVisitorList: approvedVisitorListSchema,
     approvedVisitorId: approvedVisitorIdSchema,
     approvedVisitorCardAssignment: approvedVisitorCardAssignmentSchema,
-    approvedVisitorCardReturn: approvedVisitorCardReturnSchema
+    approvedVisitorCardReturn: approvedVisitorCardReturnSchema,
+    systemSessionList: systemSessionListSchema,
+    systemSessionRevoke: systemSessionRevokeSchema
   }
 };

@@ -13,7 +13,7 @@ const { createSystemNotification } = require('../services/notificationService');
 
 const router = express.Router();
 
-const issueToken = async (executor, userId) => {
+const issueToken = async (executor, userId, req, parentJti = null) => {
   const jti = uuidv4();
   const expiresAt = new Date(Date.now() + config.JWT_TTL_SECONDS * 1000);
   const token = jwt.sign(
@@ -28,8 +28,18 @@ const issueToken = async (executor, userId) => {
     }
   );
   await executor.execute(
-    'INSERT INTO auth_tokens (jti, user_id, expires_at) VALUES (?, ?, ?)',
-    [jti, userId, expiresAt]
+    `INSERT INTO auth_tokens
+     (jti, user_id, expires_at, ip_address, last_ip_address, user_agent, parent_jti)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      jti,
+      userId,
+      expiresAt,
+      req.ip?.replace(/^::ffff:/, '').slice(0, 45) || null,
+      req.ip?.replace(/^::ffff:/, '').slice(0, 45) || null,
+      req.get('user-agent')?.slice(0, 500) || null,
+      parentJti
+    ]
   );
   return { token, jti, expiresAt };
 };
@@ -144,7 +154,7 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
       return res.status(403).json({ error: 'This account is awaiting approval or has been deactivated.' });
     }
 
-    const { token, expiresAt } = await issueToken(db, user.id);
+    const { token, expiresAt } = await issueToken(db, user.id, req);
     await db.execute('UPDATE user_profiles SET last_login = NOW() WHERE id = ?', [user.id]);
 
     return res.json({
@@ -171,15 +181,21 @@ router.post('/auth/refresh', authenticateToken, async (req, res) => {
   try {
     await connection.beginTransaction();
     const [result] = await connection.execute(
-      `UPDATE auth_tokens SET revoked_at = NOW()
+      `UPDATE auth_tokens
+       SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'REFRESHED'
        WHERE jti = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > NOW()`,
-      [req.user.jti, req.user.id]
+      [req.user.id, req.user.jti, req.user.id]
     );
     if (result.affectedRows !== 1) {
       await connection.rollback();
       return res.status(409).json({ error: 'Session has already been refreshed or revoked.' });
     }
-    const { token, expiresAt } = await issueToken(connection, req.user.id);
+    const { token, expiresAt } = await issueToken(
+      connection,
+      req.user.id,
+      req,
+      req.user.jti
+    );
     await connection.commit();
     return res.json({ token, expires_at: expiresAt });
   } catch (error) {
@@ -194,8 +210,10 @@ router.post('/auth/refresh', authenticateToken, async (req, res) => {
 router.post('/logout', authenticateToken, async (req, res) => {
   try {
     await db.execute(
-      'UPDATE auth_tokens SET revoked_at = NOW() WHERE jti = ? AND revoked_at IS NULL',
-      [req.user.jti]
+      `UPDATE auth_tokens
+       SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'USER_LOGOUT'
+       WHERE jti = ? AND revoked_at IS NULL`,
+      [req.user.id, req.user.jti]
     );
     return res.json({ message: 'Logout successful.' });
   } catch (error) {
@@ -207,8 +225,10 @@ router.post('/logout', authenticateToken, async (req, res) => {
 router.post('/logout-all', authenticateToken, async (req, res) => {
   try {
     await db.execute(
-      'UPDATE auth_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL',
-      [req.user.id]
+      `UPDATE auth_tokens
+       SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'USER_LOGOUT_ALL'
+       WHERE user_id = ? AND revoked_at IS NULL`,
+      [req.user.id, req.user.id]
     );
     return res.json({ message: 'All sessions revoked successfully.' });
   } catch (error) {

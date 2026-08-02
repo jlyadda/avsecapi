@@ -151,7 +151,7 @@ router.post(
       );
       await connection.execute(
         `UPDATE auth_tokens
-         SET revoked_at = NOW()
+         SET revoked_at = NOW(), revocation_reason = 'PASSWORD_RESET'
          WHERE user_id = ? AND revoked_at IS NULL`,
         [reset.user_id]
       );

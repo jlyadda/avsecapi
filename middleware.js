@@ -108,6 +108,13 @@ const authenticateToken = async (req, res, next) => {
       dept: session.department,
       jti: decoded.jti
     };
+    await db.execute(
+      `UPDATE auth_tokens
+       SET last_seen_at = NOW(3), last_ip_address = ?
+       WHERE jti = ?
+         AND last_seen_at < DATE_SUB(NOW(3), INTERVAL 60 SECOND)`,
+      [req.ip?.replace(/^::ffff:/, '').slice(0, 45) || null, decoded.jti]
+    );
     return next();
   } catch (error) {
     if (!['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name)) {

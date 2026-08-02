@@ -996,6 +996,75 @@ Possible errors:
 - `403`: target user is outside the caller’s authority
 - `404`: user not found
 
+## System Session Monitoring
+
+Super administrators can monitor currently logged-in users and historical
+sessions without exposing JWT values, password data, or credential hashes.
+
+### `GET /api/admin/system-sessions`
+
+**Allowed role:** `super_admin`
+
+The default `status` is `ACTIVE`, which returns currently logged-in users.
+Supported filters are `status`, `search`, `role`, `user_id`, `ip_address`,
+`page`, and `page_size`. Status values are `ACTIVE`, `REVOKED`, `EXPIRED`, and
+`ALL`.
+
+```json
+{
+  "summary": {
+    "logged_in_users": 3,
+    "active_sessions": 4,
+    "revoked_sessions": 10,
+    "expired_sessions": 25
+  },
+  "sessions": [
+    {
+      "session_id": "session-uuid",
+      "user_id": "user-uuid",
+      "user_name": "j.lyadda",
+      "full_name": "Jonathan Lyadda",
+      "email": "j.lyadda@example.com",
+      "department": "Aviation Security",
+      "role": "security_assistant",
+      "account_active": true,
+      "status": "ACTIVE",
+      "session_started_at": "2026-08-02T08:00:00.000Z",
+      "last_seen_at": "2026-08-02T09:15:00.000Z",
+      "expires_at": "2026-08-02T13:00:00.000Z",
+      "configured_duration_seconds": 18000,
+      "elapsed_duration_seconds": 4500,
+      "remaining_seconds": 13500,
+      "ip_address": "192.0.2.25",
+      "last_ip_address": "192.0.2.25",
+      "user_agent": "Mozilla/5.0 ...",
+      "parent_jti": null,
+      "is_current_session": false
+    }
+  ],
+  "pagination": {}
+}
+```
+
+`ip_address` is the login IP. `last_ip_address` is refreshed with session
+activity. `parent_jti` links a refreshed session to the session it replaced.
+Activity timestamps are updated at most once per minute to avoid unnecessary
+database writes. Viewing session information is audited.
+
+### `POST /api/admin/system-sessions/:jti/revoke`
+
+**Allowed role:** `super_admin`
+
+```json
+{
+  "reason": "Unrecognized device reported by the account owner."
+}
+```
+
+Revocation takes effect on the target’s next request and is audited with the
+actor, target user, request ID, and optional human reason. A super administrator
+must use `/api/logout` instead of this route to revoke their current session.
+
 ## Approved Visitors
 
 The visitor data model now separates three concerns:

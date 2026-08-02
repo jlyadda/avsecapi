@@ -84,9 +84,10 @@ router.post(
           [passwordHash, req.user.id]
         );
         await connection.execute(
-          `UPDATE auth_tokens SET revoked_at = NOW()
+          `UPDATE auth_tokens
+           SET revoked_at = NOW(), revoked_by = ?, revocation_reason = 'PASSWORD_CHANGED'
            WHERE user_id = ? AND jti <> ? AND revoked_at IS NULL`,
-          [req.user.id, req.user.jti]
+          [req.user.id, req.user.id, req.user.jti]
         );
         await connection.commit();
       } catch (error) {
