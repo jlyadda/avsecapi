@@ -43,6 +43,7 @@ test('internal application, card, account, user list and refresh workflows', asy
   const identityNumber = `OPS${Date.now()}`;
   const password = 'InitialPassword12!';
   let applicationId;
+  let managerStageAssigneeId;
 
   try {
     const passwordHash = await bcrypt.hash(password, 12);
@@ -98,6 +99,24 @@ test('internal application, card, account, user list and refresh workflows', asy
     const managerSession = await createSessionToken(managerId);
     const supervisorSession = await createSessionToken(supervisorId);
     const assistantSession = await createSessionToken(assistantId);
+    const [[managerStage]] = await db.query(
+      `SELECT stage.id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       INNER JOIN application_workflow_stages stage
+         ON stage.version_id = version.id
+       WHERE workflow.application_type = 'VISITOR' AND workflow.is_active = 1
+       ORDER BY stage.sequence_number
+       LIMIT 1`
+    );
+    managerStageAssigneeId = uuidv4();
+    await db.execute(
+      `INSERT INTO workflow_stage_assignees
+       (id, stage_id, assignee_type, assignee_value)
+       VALUES (?, ?, 'USER', ?)`,
+      [managerStageAssigneeId, managerStage.id, managerId]
+    );
     const { port } = server.address();
     const baseUrl = `http://127.0.0.1:${port}/api`;
     const headers = {
@@ -220,6 +239,19 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal(facilitationApproved.status, 200);
     assert.equal((await facilitationApproved.json()).workflow.status, 'APPROVED');
 
+    const approvedVisitorsResponse = await fetch(
+      `${baseUrl}/visitors?search=${identityNumber}&status=APPROVED`,
+      {
+        headers: { authorization: `Bearer ${assistantSession.token}` }
+      }
+    );
+    assert.equal(approvedVisitorsResponse.status, 200);
+    const approvedVisitors = await approvedVisitorsResponse.json();
+    assert.equal(approvedVisitors.pagination.total, 1);
+    const approvedVisitor = approvedVisitors.visitors[0];
+    assert.equal(approvedVisitor.application_id, applicationId);
+    assert.equal(Boolean(approvedVisitor.pass_assignment_eligible), true);
+
     const workflowHistory = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/workflow`,
       { headers }
@@ -231,7 +263,7 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal(workflow.actions.length, 3);
 
     const assigned = await fetch(
-      `${baseUrl}/visitor-applications/${applicationId}/card-assignment`,
+      `${baseUrl}/visitors/${approvedVisitor.id}/card-assignment`,
       {
         method: 'POST',
         headers: {
@@ -242,7 +274,7 @@ test('internal application, card, account, user list and refresh workflows', asy
       }
     );
     assert.equal(assigned.status, 200);
-    assert.equal((await assigned.json()).application.card_status, 'ASSIGNED');
+    assert.equal((await assigned.json()).visitor.card_status, 'ASSIGNED');
 
     const checkedIn = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/check-in`,
@@ -271,7 +303,7 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal(blockedCheckout.status, 409);
 
     const returned = await fetch(
-      `${baseUrl}/visitor-applications/${applicationId}/card-return`,
+      `${baseUrl}/visitors/${approvedVisitor.id}/card-return`,
       {
         method: 'POST',
         headers: {
@@ -316,6 +348,12 @@ test('internal application, card, account, user list and refresh workflows', asy
     });
     assert.equal(newTokenAccepted.status, 200);
   } finally {
+    if (managerStageAssigneeId) {
+      await db.execute(
+        'DELETE FROM workflow_stage_assignees WHERE id = ?',
+        [managerStageAssigneeId]
+      );
+    }
     if (applicationId) {
       await db.execute('DELETE FROM notifications WHERE resource_id = ?', [applicationId]);
     }

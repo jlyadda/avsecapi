@@ -7,6 +7,10 @@ const { validate, schemas } = require('../validation');
 const { findApplication } = require('./applicationHelpers');
 const { recordAudit } = require('../audit');
 const { createSystemNotification } = require('../services/notificationService');
+const {
+  assignAccessCard,
+  returnAccessCard
+} = require('../services/cardAssignmentService');
 
 const router = express.Router();
 
@@ -549,88 +553,20 @@ router.post(
         await connection.rollback();
         return res.status(404).json({ error: 'Application not found.' });
       }
-      if (!['APPROVED', 'CHECKED_IN'].includes(application.status)) {
-        await connection.rollback();
-        return res.status(409).json({
-          error: `A card cannot be assigned while the application is ${application.status}.`
-        });
-      }
-      if (!application.within_visit_period) {
-        await connection.rollback();
-        return res.status(409).json({ error: 'The visit is outside its approved date range.' });
-      }
-      if (application.card_id) {
-        await connection.rollback();
-        return res.status(409).json({ error: 'This application already has an assigned card.' });
-      }
-
-      const [cardRows] = await connection.execute(
-        `SELECT c.*, level.is_active AS access_level_is_active,
-                category.is_active AS category_is_active
-         FROM access_cards c
-         INNER JOIN card_access_levels level ON level.code = c.access_level
-         INNER JOIN card_categories category ON category.code = c.category
-         WHERE c.number = ?
-         LIMIT 1 FOR UPDATE`,
-        [req.body.card_number]
-      );
-      const card = cardRows[0];
-      if (!card) {
-        await connection.rollback();
-        return res.status(404).json({ error: 'Access card not found.' });
-      }
-      if (
-        !card.is_active
-        || !card.access_level_is_active
-        || !card.category_is_active
-        || card.is_lost
-        || card.is_damaged
-        || card.is_assigned
-        || !card.is_available
-      ) {
-        await connection.rollback();
-        return res.status(409).json({ error: 'Access card is not available for assignment.' });
-      }
-
-      await connection.execute(
-        `INSERT INTO card_assignments (id, card_id, application_id, assigned_by)
-         VALUES (?, ?, ?, ?)`,
-        [uuidv4(), card.id, application.id, req.user.id]
-      );
-      await connection.execute(
-        `INSERT INTO card_events
-         (id, card_id, application_id, event_type, performed_by)
-         VALUES (?, ?, ?, 'ASSIGNED', ?)`,
-        [uuidv4(), card.id, application.id, req.user.id]
-      );
-      await recordAudit(connection, {
+      await assignAccessCard(connection, {
+        application,
+        cardNumber: req.body.card_number,
         actorId: req.user.id,
-        action: 'ACCESS_CARD_ASSIGNED',
-        resourceType: 'access_card',
-        resourceId: card.id,
-        requestId: req.requestId,
-        metadata: {
-          application_id: application.id,
-          application_number: application.application_number
-        }
+        requestId: req.requestId
       });
-      await connection.execute(
-        `UPDATE access_cards
-         SET current_application_id = ?, holder_name = ?, holder_phone = ?,
-             is_assigned = 1, is_available = 0, is_returned = 0
-         WHERE id = ?`,
-        [
-          application.id,
-          `${application.first_name} ${application.last_name}`,
-          application.personal_phone,
-          card.id
-        ]
-      );
       await connection.commit();
       const updatedApplication = await findApplication(db, application.id);
       return res.json({ application: updatedApplication });
     } catch (error) {
       await connection.rollback();
+      if (error.status) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
       if (error.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ error: 'Card or application is already assigned.' });
       }
@@ -657,58 +593,19 @@ router.post(
         return res.status(404).json({ error: 'Application not found.' });
       }
 
-      const [assignmentRows] = await connection.execute(
-        `SELECT ca.id, ca.card_id
-         FROM card_assignments ca
-         WHERE ca.application_id = ? AND ca.status = 'ACTIVE'
-         LIMIT 1 FOR UPDATE`,
-        [application.id]
-      );
-      const assignment = assignmentRows[0];
-      if (!assignment) {
-        await connection.rollback();
-        return res.status(409).json({ error: 'This application has no active card assignment.' });
-      }
-      await connection.execute(
-        'SELECT id FROM access_cards WHERE id = ? FOR UPDATE',
-        [assignment.card_id]
-      );
-      await connection.execute(
-        `UPDATE card_assignments
-         SET status = 'RETURNED', returned_by = ?, returned_at = NOW(), return_condition = 'GOOD'
-         WHERE id = ?`,
-        [req.user.id, assignment.id]
-      );
-      await connection.execute(
-        `INSERT INTO card_events
-         (id, card_id, application_id, event_type, performed_by)
-         VALUES (?, ?, ?, 'RETURNED', ?)`,
-        [uuidv4(), assignment.card_id, application.id, req.user.id]
-      );
-      await recordAudit(connection, {
+      await returnAccessCard(connection, {
+        application,
         actorId: req.user.id,
-        action: 'ACCESS_CARD_RETURNED',
-        resourceType: 'access_card',
-        resourceId: assignment.card_id,
-        requestId: req.requestId,
-        metadata: {
-          application_id: application.id,
-          application_number: application.application_number
-        }
+        requestId: req.requestId
       });
-      await connection.execute(
-        `UPDATE access_cards
-         SET current_application_id = NULL, holder_name = NULL, holder_phone = NULL,
-             is_assigned = 0, is_available = 1, is_returned = 1,
-             last_return_date = NOW()
-         WHERE id = ?`,
-        [assignment.card_id]
-      );
       await connection.commit();
       const updatedApplication = await findApplication(db, application.id);
       return res.json({ application: updatedApplication });
     } catch (error) {
       await connection.rollback();
+      if (error.status) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
       console.error(error);
       return res.status(500).json({ error: 'Unable to return access card.' });
     } finally {

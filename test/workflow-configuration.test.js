@@ -41,8 +41,22 @@ test('super admin creates and activates an immutable visitor workflow version', 
   let groupId;
   let workflowId;
   let versionId;
+  let originalWorkflowId;
+  let originalVersionId;
 
   try {
+    const [[originalWorkflow]] = await db.query(
+      `SELECT workflow.id AS workflow_id, workflow.active_version_id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       WHERE workflow.application_type = 'VISITOR'
+         AND workflow.is_active = 1
+         AND version.status = 'ACTIVE'
+       LIMIT 1`
+    );
+    originalWorkflowId = originalWorkflow.workflow_id;
+    originalVersionId = originalWorkflow.active_version_id;
     await db.execute(
       `INSERT INTO user_profiles
        (id, user_name, email, password_hash, full_name, department, user_role, is_active)
@@ -151,16 +165,29 @@ test('super admin creates and activates an immutable visitor workflow version', 
     );
     assert.equal(secondActivation.status, 409);
   } finally {
-    await db.execute(
-      `UPDATE application_workflow_versions
-       SET status = 'ACTIVE'
-       WHERE id = '30000000-0000-4000-8000-000000000001'`
-    );
-    await db.execute(
-      `UPDATE application_workflows
-       SET active_version_id = '30000000-0000-4000-8000-000000000001', is_active = 1
-       WHERE id = '20000000-0000-4000-8000-000000000001'`
-    );
+    if (originalWorkflowId && originalVersionId) {
+      await db.execute(
+        `UPDATE application_workflow_versions version
+         INNER JOIN application_workflows workflow ON workflow.id = version.workflow_id
+         SET version.status = 'RETIRED'
+         WHERE workflow.application_type = 'VISITOR' AND version.status = 'ACTIVE'`
+      );
+      await db.execute(
+        `UPDATE application_workflows
+         SET active_version_id = NULL
+         WHERE application_type = 'VISITOR'`
+      );
+      await db.execute(
+        `UPDATE application_workflow_versions
+         SET status = 'ACTIVE' WHERE id = ?`,
+        [originalVersionId]
+      );
+      await db.execute(
+        `UPDATE application_workflows
+         SET active_version_id = ?, is_active = 1 WHERE id = ?`,
+        [originalVersionId, originalWorkflowId]
+      );
+    }
     if (workflowId) {
       await db.execute(
         'DELETE FROM audit_events WHERE resource_id = ?',

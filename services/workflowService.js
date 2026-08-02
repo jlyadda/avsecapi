@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { createSystemNotification } = require('./notificationService');
+const { promoteApprovedVisitor } = require('./approvedVisitorService');
 
 const workflowError = (status, code, message) => {
   const error = new Error(message);
@@ -323,6 +324,7 @@ const executeVisitorWorkflowAction = async (
      WHERE id = ?`,
     [user.id, notes || null, application.id]
   );
+  await promoteApprovedVisitor(executor, application.id, user.id);
   return {
     status: 'APPROVED',
     completed: true,

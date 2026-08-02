@@ -480,6 +480,10 @@ router.post(
         "UPDATE visitor_applications SET status = 'CHECKED_IN' WHERE id = ?",
         [application.id]
       );
+      await connection.execute(
+        "UPDATE visitors SET status = 'CHECKED_IN' WHERE application_id = ?",
+        [application.id]
+      );
       await recordAudit(connection, {
         actorId: req.user.id,
         action: 'VISITOR_CHECKED_IN',
@@ -543,6 +547,10 @@ router.post(
       );
       await connection.execute(
         "UPDATE visitor_applications SET status = 'CHECKED_OUT' WHERE id = ?",
+        [application.id]
+      );
+      await connection.execute(
+        "UPDATE visitors SET status = 'CHECKED_OUT' WHERE application_id = ?",
         [application.id]
       );
       await connection.execute(

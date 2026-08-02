@@ -160,6 +160,7 @@ test('visitor application completes approval, check-in and check-out', async () 
   let externalApiKeyId;
   let vehicleApiKeyId;
   let vehicleApplicationId;
+  let reviewerStageAssigneeId;
 
   try {
     await db.execute(
@@ -190,6 +191,24 @@ test('visitor application completes approval, check-in and check-out', async () 
     const supervisorSession = await createSessionToken(supervisorId);
     const assistantSession = await createSessionToken(assistantId);
     sessionIds.push(reviewerSession.jti, supervisorSession.jti, assistantSession.jti);
+    const [[managerStage]] = await db.query(
+      `SELECT stage.id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       INNER JOIN application_workflow_stages stage
+         ON stage.version_id = version.id
+       WHERE workflow.application_type = 'VISITOR' AND workflow.is_active = 1
+       ORDER BY stage.sequence_number
+       LIMIT 1`
+    );
+    reviewerStageAssigneeId = uuidv4();
+    await db.execute(
+      `INSERT INTO workflow_stage_assignees
+       (id, stage_id, assignee_type, assignee_value)
+       VALUES (?, ?, 'USER', ?)`,
+      [reviewerStageAssigneeId, managerStage.id, adminId]
+    );
 
     const { port } = server.address();
     const baseUrl = `http://127.0.0.1:${port}/api`;
@@ -402,6 +421,12 @@ test('visitor application completes approval, check-in and check-out', async () 
     });
     assert.equal(blockedAfterRevocation.status, 401);
   } finally {
+    if (reviewerStageAssigneeId) {
+      await db.execute(
+        'DELETE FROM workflow_stage_assignees WHERE id = ?',
+        [reviewerStageAssigneeId]
+      );
+    }
     if (vehicleApplicationId) {
       await db.execute(
         'DELETE FROM notifications WHERE resource_id = ?',

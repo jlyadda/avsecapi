@@ -821,12 +821,38 @@ const notificationTemplateUpdateSchema = z.object({
   )
 });
 
+const approvedVisitorListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    status: z.enum(['APPROVED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED', 'REVOKED'])
+      .optional(),
+    valid_on: isoDate.optional(),
+    ...paginationQuery
+  }).strict()
+});
+
+const approvedVisitorIdSchema = z.object({
+  params: z.object({ id: uuid })
+});
+
+const approvedVisitorCardAssignmentSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    card_number: z.string().trim().min(1).max(100)
+  }).strict()
+});
+
+const approvedVisitorCardReturnSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({}).strict()
+});
+
 const validate = (schema) => (req, res, next) => {
   const result = schema.safeParse({ body: req.body, params: req.params, query: req.query });
 
   if (!result.success) {
     return res.status(400).json({
-      error: 'Validation failed.',
+      error: 'Validation failed, crosscheck input fields.',
       code: 'VALIDATION_FAILED',
       details: result.error.issues.map((issue) => ({
         field: issue.path.join('.'),
@@ -907,6 +933,10 @@ module.exports = {
     notificationEmailCategoryUpdate: notificationEmailCategoryUpdateSchema,
     notificationTemplateList: notificationTemplateListSchema,
     notificationTemplateCreate: notificationTemplateCreateSchema,
-    notificationTemplateUpdate: notificationTemplateUpdateSchema
+    notificationTemplateUpdate: notificationTemplateUpdateSchema,
+    approvedVisitorList: approvedVisitorListSchema,
+    approvedVisitorId: approvedVisitorIdSchema,
+    approvedVisitorCardAssignment: approvedVisitorCardAssignmentSchema,
+    approvedVisitorCardReturn: approvedVisitorCardReturnSchema
   }
 };

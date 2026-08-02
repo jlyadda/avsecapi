@@ -996,6 +996,88 @@ Possible errors:
 - `403`: target user is outside the caller’s authority
 - `404`: user not found
 
+## Approved Visitors
+
+The visitor data model now separates three concerns:
+
+- `avsec_visitors` is the reusable identity profile and security record.
+- `visitor_applications` stores every submitted access request and its workflow.
+- `visitors` is the operational register containing only applications that
+  completed final approval.
+
+Final workflow approval inserts the visitor into `visitors` in the same
+database transaction. Existing approved applications were backfilled during
+migration `018_approved_visitors.sql`. Check-in and check-out keep the approved
+visitor status synchronized.
+
+### `GET /api/visitors`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `audit`, `viewer`,
+`admin`, `super_admin`
+
+Supports `search`, `status`, `valid_on`, `page`, and `page_size`. Search covers
+application number, visitor name, identity number, company, and assigned card.
+`valid_on` uses ISO `YYYY-MM-DD`.
+
+Each visitor includes identity details, approved access areas and dates,
+approver display name, current card details, `within_valid_period`, and
+`pass_assignment_eligible`.
+
+```json
+{
+  "visitors": [
+    {
+      "id": "approved-visitor-uuid",
+      "application_id": "application-uuid",
+      "application_number": "AVSEC-20260802-A1B2C3D4",
+      "full_name": "Jonathan Gift Lyadda",
+      "identity_number": "CM1234567890",
+      "company": "Example Limited",
+      "valid_from": "2026-08-02",
+      "valid_until": "2026-08-05",
+      "status": "APPROVED",
+      "card_number": null,
+      "pass_assignment_eligible": 1
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 1,
+    "total_pages": 1
+  }
+}
+```
+
+### `GET /api/visitors/:id`
+
+Returns one approved visitor using the UUID from the `visitors` table.
+
+### `POST /api/visitors/:id/card-assignment`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
+
+```json
+{
+  "card_number": "PVG001"
+}
+```
+
+The visitor must be `APPROVED` or `CHECKED_IN`, within the approved access
+period, and have no active card. The selected card, access level, and category
+must all be active and available. Assignment is transactional and audited.
+
+### `POST /api/visitors/:id/card-return`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
+
+Request body: `{}`. This closes the active assignment, returns the card to
+available inventory, records the returning officer, and creates audit/card
+events atomically.
+
+The original application-based assignment and return routes remain available
+for backward compatibility.
+
 ## Access Cards
 
 Card numbers are unique. Creation, assignment, return, and condition changes run in database transactions. `card_assignments` records issuance/return officers and timestamps; `card_events` records inventory events.
