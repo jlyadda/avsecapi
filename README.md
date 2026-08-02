@@ -48,7 +48,7 @@ The deployment also accepts the equivalent lower-camel SMTP names:
 
 ```env
 gmailUser=avsec@example.com
-gmailAppSpecificPassword=your-google-app-password
+gmailAppSpecificPassword=google-app-password
 gmailSendserver=smtp.gmail.com
 gmailPort=587
 ```
