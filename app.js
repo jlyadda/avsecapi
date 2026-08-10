@@ -22,6 +22,7 @@ const notificationTemplateRoutes = require('./routes/notificationTemplates');
 const applicationWorkflowRoutes = require('./routes/applicationWorkflows');
 const applicationWorkflowAdminRoutes = require('./routes/applicationWorkflowAdmin');
 const systemSessionRoutes = require('./routes/systemSessions');
+const accessAreaRoutes = require('./routes/accessAreas');
 const { apiLimiter } = require('./rateLimits');
 
 const app = express();
@@ -66,6 +67,7 @@ app.use(
   applicationWorkflowRoutes,
   applicationWorkflowAdminRoutes,
   systemSessionRoutes,
+  accessAreaRoutes,
   visitorRoutes,
   userRoutes
 );

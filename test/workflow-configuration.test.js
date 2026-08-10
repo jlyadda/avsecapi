@@ -129,6 +129,7 @@ test('super admin creates and activates an immutable visitor workflow version', 
               code: 'CUSTOM_MANAGER_REVIEW',
               name: 'Custom Manager Review',
               sla_hours: 12,
+              captures_access_approval: true,
               assignees: [{ type: 'GROUP', value: groupId }]
             },
             {

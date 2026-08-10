@@ -149,6 +149,7 @@ router.get(
       const [stages] = await db.execute(
         `SELECT stage.id, stage.sequence_number, stage.code, stage.name,
                 stage.description, stage.approval_policy, stage.sla_hours,
+                stage.captures_access_approval,
                 stage_instance.status, stage_instance.activated_at,
                 stage_instance.completed_at, stage_instance.notes,
                 stage_instance.completed_by AS completed_by_id,
@@ -174,11 +175,37 @@ router.get(
          ORDER BY action.created_at`,
         [instance.id]
       );
+      const [approvedAreas] = await db.execute(
+        `SELECT area.code, area.name, approved.approved_by AS approved_by_id,
+                COALESCE(user.full_name, user.user_name) AS approved_by,
+                approved.approved_at
+         FROM application_approved_access_areas approved
+         INNER JOIN access_areas area ON area.code = approved.area_code
+         LEFT JOIN user_profiles user ON user.id = approved.approved_by
+         WHERE approved.application_id = ?
+         ORDER BY area.sort_order, area.name`,
+        [application.id]
+      );
+      const [documentReviews] = await db.execute(
+        `SELECT review.document_key, review.document_url, review.verdict, review.notes,
+                review.reviewed_by AS reviewed_by_id,
+                COALESCE(user.full_name, user.user_name) AS reviewed_by,
+                review.reviewed_at
+         FROM application_document_reviews review
+         LEFT JOIN user_profiles user ON user.id = review.reviewed_by
+         WHERE review.application_id = ?
+         ORDER BY review.document_key`,
+        [application.id]
+      );
       return res.json({
         workflow: {
           ...instance,
           stages,
-          actions
+          actions,
+          approved_visit_starts: application.approved_visit_starts,
+          approved_visit_ends: application.approved_visit_ends,
+          approved_areas_of_access: approvedAreas,
+          document_reviews: documentReviews
         }
       });
     } catch (error) {
@@ -207,6 +234,10 @@ router.post(
         user: req.user,
         action: req.body.action,
         notes: req.body.notes,
+        approvedAreas: req.body.approved_areas_of_access,
+        approvedVisitStarts: req.body.approved_visit_starts,
+        approvedVisitEnds: req.body.approved_visit_ends,
+        documentReviews: req.body.document_reviews,
         requestId: req.requestId
       });
       await recordAudit(connection, {
@@ -218,7 +249,16 @@ router.post(
         metadata: {
           application_number: application.application_number,
           stage: result.actedStage.code,
-          resulting_status: result.status
+          resulting_status: result.status,
+          approved_visit_starts: req.body.approved_visit_starts || null,
+          approved_visit_ends: req.body.approved_visit_ends || null,
+          approved_areas_of_access: req.body.approved_areas_of_access || null,
+          document_review_summary: req.body.document_reviews
+            ? req.body.document_reviews.reduce((summary, review) => ({
+              ...summary,
+              [review.verdict]: (summary[review.verdict] || 0) + 1
+            }), {})
+            : null
         }
       });
       if (result.completed) {
@@ -255,7 +295,11 @@ router.post(
     } catch (error) {
       await connection.rollback();
       if (error.status) {
-        return sendError(res, error.status, error.code, error.message);
+        return res.status(error.status).json({
+          error: error.message,
+          code: error.code,
+          expected_document_keys: error.expectedDocumentKeys
+        });
       }
       console.error(error);
       return sendError(

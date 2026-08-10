@@ -40,6 +40,7 @@ test('internal application, card, account, user list and refresh workflows', asy
   const supervisorId = uuidv4();
   const assistantId = uuidv4();
   let cardId;
+  let incompatibleCardId;
   const identityNumber = `OPS${Date.now()}`;
   const password = 'InitialPassword12!';
   let applicationId;
@@ -197,6 +198,34 @@ test('internal application, card, account, user list and refresh workflows', asy
     const card = (await createdCard.json()).card;
     cardId = card.id;
 
+    const accessAreasResponse = await fetch(`${baseUrl}/access-areas`, { headers });
+    assert.equal(accessAreasResponse.status, 200);
+    const accessAreas = (await accessAreasResponse.json()).access_areas;
+    assert.equal(accessAreas.some((area) => area.code === 'PUBLIC_AREAS'), true);
+
+    const levelAreasResponse = await fetch(
+      `${baseUrl}/card-access-levels/LEVEL_1/areas`,
+      { headers }
+    );
+    assert.equal(levelAreasResponse.status, 200);
+    assert.deepEqual(
+      (await levelAreasResponse.json()).access_areas.map((area) => area.code),
+      ['PUBLIC_AREAS']
+    );
+
+    const incompatibleCardResponse = await fetch(`${baseUrl}/access-cards`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        number: `BAD${uuidv4().slice(0, 8)}`,
+        access_level: 'LEVEL_3',
+        category: 'VISITOR'
+      })
+    });
+    assert.equal(incompatibleCardResponse.status, 201);
+    const incompatibleCard = (await incompatibleCardResponse.json()).card;
+    incompatibleCardId = incompatibleCard.id;
+
     const managerApproved = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/decision`,
       {
@@ -219,7 +248,14 @@ test('internal application, card, account, user list and refresh workflows', asy
           authorization: `Bearer ${supervisorSession.token}`,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({ action: 'APPROVE', notes: 'Senior security verified.' })
+        body: JSON.stringify({
+          action: 'APPROVE',
+          notes: 'Senior security approved public-area access.',
+          approved_visit_starts: today,
+          approved_visit_ends: today,
+          approved_areas_of_access: ['PUBLIC_AREAS'],
+          document_reviews: []
+        })
       }
     );
     assert.equal(supervisorApproved.status, 200);
@@ -250,6 +286,7 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal(approvedVisitors.pagination.total, 1);
     const approvedVisitor = approvedVisitors.visitors[0];
     assert.equal(approvedVisitor.application_id, applicationId);
+    assert.deepEqual(approvedVisitor.approved_areas_of_access, ['PUBLIC_AREAS']);
     assert.equal(Boolean(approvedVisitor.pass_assignment_eligible), true);
 
     const workflowHistory = await fetch(
@@ -261,6 +298,25 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal(workflow.status, 'APPROVED');
     assert.equal(workflow.stages.length, 3);
     assert.equal(workflow.actions.length, 3);
+    assert.equal(workflow.approved_visit_starts, today);
+    assert.equal(workflow.approved_visit_ends, today);
+    assert.deepEqual(workflow.document_reviews, []);
+
+    const incompatibleAssignment = await fetch(
+      `${baseUrl}/visitors/${approvedVisitor.id}/card-assignment`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${assistantSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ card_number: incompatibleCard.number })
+      }
+    );
+    assert.equal(incompatibleAssignment.status, 409);
+    const incompatibleAssignmentBody = await incompatibleAssignment.json();
+    assert.equal(incompatibleAssignmentBody.code, 'CARD_ACCESS_LEVEL_MISMATCH');
+    assert.deepEqual(incompatibleAssignmentBody.missing_areas, ['PUBLIC_AREAS']);
 
     const assigned = await fetch(
       `${baseUrl}/visitors/${approvedVisitor.id}/card-assignment`,
@@ -360,14 +416,15 @@ test('internal application, card, account, user list and refresh workflows', asy
     await db.execute(
       `DELETE FROM audit_events
        WHERE actor_id IN (?, ?, ?, ?)
-          OR resource_id IN (?, ?)`,
+         OR resource_id IN (?, ?, ?)`,
       [
         adminId,
         managerId,
         supervisorId,
         assistantId,
         applicationId || '',
-        cardId || ''
+        cardId || '',
+        incompatibleCardId || ''
       ]
     );
     if (applicationId) {
@@ -379,6 +436,10 @@ test('internal application, card, account, user list and refresh workflows', asy
     if (cardId) {
       await db.execute('DELETE FROM card_events WHERE card_id = ?', [cardId]);
       await db.execute('DELETE FROM access_cards WHERE id = ?', [cardId]);
+    }
+    if (incompatibleCardId) {
+      await db.execute('DELETE FROM card_events WHERE card_id = ?', [incompatibleCardId]);
+      await db.execute('DELETE FROM access_cards WHERE id = ?', [incompatibleCardId]);
     }
     await db.execute('DELETE FROM avsec_visitors WHERE identity_number = ?', [identityNumber]);
     await db.execute(

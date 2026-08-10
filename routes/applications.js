@@ -5,7 +5,11 @@ const { authenticateToken, authenticateApiKey, authorizePermission } = require('
 const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { publicApplicationLimiter } = require('../rateLimits');
-const { applicationSelect, findApplication } = require('./applicationHelpers');
+const {
+  applicationSelect,
+  findApplication,
+  normalizeApplication
+} = require('./applicationHelpers');
 const { recordAudit } = require('../audit');
 const { createSystemNotification } = require('../services/notificationService');
 const {
@@ -203,7 +207,7 @@ router.get(
       );
 
       return res.json({
-        applications,
+        applications: applications.map(normalizeApplication),
         pagination: {
           page,
           page_size,

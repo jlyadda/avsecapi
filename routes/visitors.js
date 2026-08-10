@@ -11,11 +11,38 @@ const {
 
 const router = express.Router();
 
+const toDateOnly = (value) => {
+  if (!value || typeof value === 'string') return value?.slice(0, 10) || null;
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const normalizeApprovedVisitor = (visitor) => {
+  if (!visitor) return visitor;
+  let approvedAreas = visitor.approved_areas_of_access;
+  if (typeof approvedAreas === 'string') {
+    try {
+      approvedAreas = JSON.parse(approvedAreas);
+    } catch {
+      approvedAreas = [];
+    }
+  }
+  return {
+    ...visitor,
+    valid_from: toDateOnly(visitor.valid_from),
+    valid_until: toDateOnly(visitor.valid_until),
+    approved_areas_of_access: Array.isArray(approvedAreas) ? approvedAreas : []
+  };
+};
+
 const approvedVisitorSelect = `
   SELECT approved_visitor.id, approved_visitor.application_id,
          approved_visitor.visitor_profile_id,
          approved_visitor.application_number, approved_visitor.full_name,
          approved_visitor.company, approved_visitor.email, approved_visitor.phone,
+         approved_visitor.approved_areas_of_access,
          approved_visitor.visit_reasons, approved_visitor.areas_of_access,
          approved_visitor.valid_from, approved_visitor.valid_until,
          approved_visitor.status, approved_visitor.approved_at,
@@ -95,7 +122,7 @@ router.get(
         [...values, page_size, (page - 1) * page_size]
       );
       return res.json({
-        visitors,
+        visitors: visitors.map(normalizeApprovedVisitor),
         pagination: {
           page,
           page_size,
@@ -130,7 +157,7 @@ router.get(
           code: 'APPROVED_VISITOR_NOT_FOUND'
         });
       }
-      return res.json({ visitor: rows[0] });
+      return res.json({ visitor: normalizeApprovedVisitor(rows[0]) });
     } catch (error) {
       console.error(error);
       return res.status(500).json({
@@ -178,11 +205,15 @@ router.post(
         `${approvedVisitorSelect} WHERE approved_visitor.id = ? LIMIT 1`,
         [req.params.id]
       );
-      return res.json({ visitor: rows[0] });
+      return res.json({ visitor: normalizeApprovedVisitor(rows[0]) });
     } catch (error) {
       await connection.rollback();
       if (error.status) {
-        return res.status(error.status).json({ error: error.message, code: error.code });
+        return res.status(error.status).json({
+          error: error.message,
+          code: error.code,
+          missing_areas: error.missingAreas
+        });
       }
       if (error.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({
@@ -229,7 +260,7 @@ router.post(
         `${approvedVisitorSelect} WHERE approved_visitor.id = ? LIMIT 1`,
         [req.params.id]
       );
-      return res.json({ visitor: rows[0] });
+      return res.json({ visitor: normalizeApprovedVisitor(rows[0]) });
     } catch (error) {
       await connection.rollback();
       if (error.status) {

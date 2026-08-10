@@ -429,8 +429,9 @@ router.post(
         await connection.execute(
           `INSERT INTO application_workflow_stages
            (id, version_id, sequence_number, code, name, description,
-            allow_submitter_action, require_different_actor, sla_hours)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            allow_submitter_action, require_different_actor, sla_hours,
+            captures_access_approval)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             stageId,
             versionId,
@@ -440,7 +441,8 @@ router.post(
             stage.description || null,
             stage.allow_submitter_action,
             stage.require_different_actor,
-            stage.sla_hours || null
+            stage.sla_hours || null,
+            stage.captures_access_approval
           ]
         );
         for (const assignee of stage.assignees) {

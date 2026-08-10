@@ -565,7 +565,11 @@ router.post(
     } catch (error) {
       await connection.rollback();
       if (error.status) {
-        return res.status(error.status).json({ error: error.message, code: error.code });
+        return res.status(error.status).json({
+          error: error.message,
+          code: error.code,
+          missing_areas: error.missingAreas
+        });
       }
       if (error.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ error: 'Card or application is already assigned.' });

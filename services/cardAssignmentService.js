@@ -1,10 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
 const { recordAudit } = require('../audit');
 
-const cardError = (status, code, message) => {
+const cardError = (status, code, message, details = {}) => {
   const error = new Error(message);
   error.status = status;
   error.code = code;
+  Object.assign(error, details);
   return error;
 };
 
@@ -64,6 +65,42 @@ const assignAccessCard = async (
     );
   }
 
+  const [approvedAreas] = await executor.execute(
+    `SELECT approved.area_code, area.name
+     FROM application_approved_access_areas approved
+     INNER JOIN access_areas area ON area.code = approved.area_code
+     WHERE approved.application_id = ? AND area.is_active = 1
+     ORDER BY area.sort_order, area.name`,
+    [application.id]
+  );
+  if (approvedAreas.length === 0) {
+    throw cardError(
+      409,
+      'VISITOR_HAS_NO_APPROVED_ACCESS_AREAS',
+      'The visitor has no approved access areas and cannot be assigned a card.'
+    );
+  }
+  const [missingAreas] = await executor.execute(
+    `SELECT approved.area_code, area.name
+     FROM application_approved_access_areas approved
+     INNER JOIN access_areas area ON area.code = approved.area_code
+     LEFT JOIN card_access_level_areas permitted
+       ON permitted.area_code = approved.area_code
+      AND permitted.access_level_code = ?
+     WHERE approved.application_id = ?
+       AND (area.is_active = 0 OR permitted.area_code IS NULL)
+     ORDER BY area.sort_order, area.name`,
+    [card.access_level, application.id]
+  );
+  if (missingAreas.length > 0) {
+    throw cardError(
+      409,
+      'CARD_ACCESS_LEVEL_MISMATCH',
+      'The selected card does not cover all approved access areas.',
+      { missingAreas: missingAreas.map((area) => area.area_code) }
+    );
+  }
+
   await executor.execute(
     `INSERT INTO card_assignments (id, card_id, application_id, assigned_by)
      VALUES (?, ?, ?, ?)`,
@@ -95,7 +132,8 @@ const assignAccessCard = async (
     requestId,
     metadata: {
       application_id: application.id,
-      application_number: application.application_number
+      application_number: application.application_number,
+      approved_areas: approvedAreas.map((area) => area.area_code)
     }
   });
   return card;

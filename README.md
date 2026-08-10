@@ -645,12 +645,55 @@ current stage
 ```json
 {
   "action": "APPROVE",
-  "notes": "Identity and supporting documents verified."
+  "notes": "Identity and supporting documents verified.",
+  "approved_visit_starts": "2026-08-05",
+  "approved_visit_ends": "2026-08-12",
+  "approved_areas_of_access": ["PASSENGER_TERMINAL", "AIRSIDE"],
+  "document_reviews": [
+    { "document_key": "IDENTITY_DOCUMENT", "verdict": "VALID" },
+    { "document_key": "AVSEC_ENDORSED_LETTER", "verdict": "VALID" },
+    { "document_key": "PASSPORT_PHOTOGRAPH", "verdict": "VALID" },
+    { "document_key": "OTHER_DOCUMENT_1", "verdict": "VALID" }
+  ]
 }
 ```
 
 `action` is `APPROVE` or `REJECT`. Notes are optional for approval and required
-for rejection.
+for rejection. At the one stage configured with
+`captures_access_approval: true`, the PSO/SSO supervisor must review every
+submitted document. The application response exposes `submitted_documents`
+with authoritative `document_key` and `document_url` values; clients submit a
+verdict for each key and never send the URL back.
+
+Approval also requires `approved_visit_starts`, `approved_visit_ends`, and
+`approved_areas_of_access`. Approved dates use `YYYY-MM-DD`, must remain inside
+the applicant's requested period, and cannot extend beyond identity expiry.
+Areas must be unique active codes from `GET /api/access-areas`. Every document
+must be `VALID` before approval can proceed.
+
+To reject because a document is invalid, submit all document reviews, mark the
+failed documents `INVALID`, include notes on each invalid verdict, and omit
+approved dates and areas:
+
+```json
+{
+  "action": "REJECT",
+  "notes": "The endorsed letter could not be authenticated.",
+  "document_reviews": [
+    { "document_key": "IDENTITY_DOCUMENT", "verdict": "VALID" },
+    {
+      "document_key": "AVSEC_ENDORSED_LETTER",
+      "verdict": "INVALID",
+      "notes": "Issuer signature could not be verified."
+    },
+    { "document_key": "PASSPORT_PHOTOGRAPH", "verdict": "VALID" },
+    { "document_key": "OTHER_DOCUMENT_1", "verdict": "VALID" }
+  ]
+}
+```
+
+The seeded capture stage is `SENIOR_SECURITY_REVIEW`. The acting user must have
+the `supervisor` role. Other stages must omit dates, areas, and document reviews.
 
 ```json
 {
@@ -666,17 +709,19 @@ for rejection.
 }
 ```
 
-The transaction locks the application and workflow instance, records an
-append-only action and audit event, activates the next stage, and creates
-notifications for its assignees. Final approval or rejection emails the
-external applicant.
+The transaction locks the application and workflow instance, records document
+verdicts with reviewer identity and timestamp, stores the approved access grant,
+records an append-only action and audit event, activates the next stage, and
+creates notifications for its assignees. Final approval or rejection emails the
+external applicant. URLs are not copied into audit metadata.
 
 ### `GET /api/visitor-applications/:reference/workflow`
 
 **Allowed roles:** all internal roles that can view visitor applications
 
 Returns the fixed workflow version, ordered stage history, reviewer display
-names, notes, timestamps, request IDs, and append-only actions.
+names, notes, timestamps, request IDs, append-only actions, approved dates,
+approved areas, and document verdicts.
 
 ### Workflow Group Administration
 
@@ -715,12 +760,13 @@ Create a draft version:
 {
   "stages": [
     {
-      "code": "MANAGER_REVIEW",
-      "name": "Manager Review",
-      "description": "Initial management review",
+      "code": "SENIOR_SECURITY_REVIEW",
+      "name": "PSO or SSO Review",
+      "description": "Security review and access grant",
       "allow_submitter_action": false,
       "require_different_actor": true,
       "sla_hours": 24,
+      "captures_access_approval": true,
       "assignees": [
         {
           "type": "GROUP",
@@ -728,7 +774,7 @@ Create a draft version:
         },
         {
           "type": "ROLE",
-          "value": "admin"
+          "value": "supervisor"
         }
       ]
     }
@@ -739,6 +785,11 @@ Create a draft version:
 Stages execute in array order. Assignee types are `ROLE`, `GROUP`, and `USER`.
 Group and user values must be UUIDs; role values must be known system roles.
 Every stage needs at least one assignee.
+Every workflow version must have exactly one stage with
+`captures_access_approval: true`. That supervisor's dates and areas become the
+authoritative access grant used for validity checks and pass assignment.
+Requested dates, requested areas, submitted links, and review verdicts remain
+available separately for audit and comparison.
 
 Versions are immutable after activation. To change a live workflow, create and
 activate a new draft. Activation retires the previously active visitor workflow
@@ -753,7 +804,8 @@ Creates a visit session and moves an approved application to `CHECKED_IN`.
 Requirements:
 
 - Application status must be `APPROVED`.
-- The database date must be between `visit_starts` and `visit_ends`.
+- The database date must be between `approved_visit_starts` and
+  `approved_visit_ends`.
 - An application can have only one visit session.
 
 **Request**
@@ -1088,7 +1140,7 @@ Supports `search`, `status`, `valid_on`, `page`, and `page_size`. Search covers
 application number, visitor name, identity number, company, and assigned card.
 `valid_on` uses ISO `YYYY-MM-DD`.
 
-Each visitor includes identity details, approved access areas and dates,
+Each visitor includes identity details, approved access-area codes and dates,
 approver display name, current card details, `within_valid_period`, and
 `pass_assignment_eligible`.
 
@@ -1102,6 +1154,7 @@ approver display name, current card details, `within_valid_period`, and
       "full_name": "Jonathan Gift Lyadda",
       "identity_number": "CM1234567890",
       "company": "Example Limited",
+      "approved_areas_of_access": ["PASSENGER_TERMINAL", "AIRSIDE"],
       "valid_from": "2026-08-02",
       "valid_until": "2026-08-05",
       "status": "APPROVED",
@@ -1134,7 +1187,11 @@ Returns one approved visitor using the UUID from the `visitors` table.
 
 The visitor must be `APPROVED` or `CHECKED_IN`, within the approved access
 period, and have no active card. The selected card, access level, and category
-must all be active and available. Assignment is transactional and audited.
+must all be active and available. Its access level must cover every area
+approved by the PSO/SSO. Assignment is transactional and audited. A card that
+does not cover the complete approved set returns `409
+CARD_ACCESS_LEVEL_MISMATCH` with `missing_areas`; an approved visitor without an
+area decision returns `409 VISITOR_HAS_NO_APPROVED_ACCESS_AREAS`.
 
 ### `POST /api/visitors/:id/card-return`
 
@@ -1162,6 +1219,41 @@ them dynamically rather than maintaining a fixed enum.
 
 Both routes accept `include_inactive=true|false`. Responses contain stable
 `code`, editable `name`, `description`, `sort_order`, and `is_active`.
+
+### Access Area Administration
+
+- `GET /api/access-areas?include_inactive=false` - all internal roles can load
+  the PSO/SSO approval choices.
+- `POST /api/access-areas` - `admin` and `super_admin` create an area.
+- `PATCH /api/access-areas/:code` - `admin` and `super_admin` edit or deactivate
+  an area. Areas used by active approved visitors cannot be deactivated.
+- `GET /api/card-access-levels/:code/areas` - all internal roles can inspect the
+  physical areas covered by an access level.
+- `PUT /api/card-access-levels/:code/areas` - `admin` and `super_admin`
+  atomically replace the level's active area mappings.
+
+Create an area:
+
+```json
+{
+  "code": "MAINTENANCE_HANGAR",
+  "name": "Maintenance Hangar",
+  "description": "Restricted engineering maintenance area",
+  "sort_order": 70
+}
+```
+
+Replace an access level's coverage:
+
+```json
+{
+  "area_codes": ["PUBLIC_AREAS", "PASSENGER_TERMINAL"]
+}
+```
+
+Area codes are stable identifiers. Renaming an area changes only its display
+name. Mapping changes affect future assignments; active assignment history
+remains append-only and unchanged.
 
 ### `POST /api/card-access-levels`
 
@@ -1312,7 +1404,9 @@ number, return condition, and assignment status.
 }
 ```
 
-The application must be `APPROVED` or `CHECKED_IN` and inside its approved date period. The card must be available and neither damaged nor lost. Conflicts return `409`.
+The application must be `APPROVED` or `CHECKED_IN` and inside its approved date
+period. The card must be available, neither damaged nor lost, and its access
+level must cover every approved access area. Conflicts return `409`.
 
 **Response — `200`:** `{ "application": {} }`
 

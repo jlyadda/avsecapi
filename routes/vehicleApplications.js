@@ -81,8 +81,11 @@ router.post(
            AND v.identity_number = ?
            AND v.security_status = 'ACTIVE'
            AND a.status IN ('APPROVED', 'CHECKED_IN')
-           AND ? >= TIMESTAMP(a.visit_starts, '00:00:00')
-           AND ? <= DATE_ADD(TIMESTAMP(a.visit_ends, '00:00:00'), INTERVAL 1 DAY)
+           AND ? >= TIMESTAMP(COALESCE(a.approved_visit_starts, a.visit_starts), '00:00:00')
+           AND ? <= DATE_ADD(
+             TIMESTAMP(COALESCE(a.approved_visit_ends, a.visit_ends), '00:00:00'),
+             INTERVAL 1 DAY
+           )
          LIMIT 1
          FOR UPDATE`,
         [

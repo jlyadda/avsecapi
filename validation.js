@@ -736,6 +736,7 @@ const workflowStage = z.object({
   allow_submitter_action: z.boolean().default(false),
   require_different_actor: z.boolean().default(true),
   sla_hours: z.number().int().min(1).max(8760).nullable().optional(),
+  captures_access_approval: z.boolean().default(false),
   assignees: z.array(workflowAssignee).min(1).max(20)
 }).strict();
 
@@ -750,6 +751,13 @@ const applicationWorkflowVersionCreateSchema = z.object({
         code: 'custom',
         path: ['stages'],
         message: 'Stage codes must be unique.'
+      });
+    }
+    if (body.stages.filter((stage) => stage.captures_access_approval).length !== 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['stages'],
+        message: 'Exactly one workflow stage must approve access areas.'
       });
     }
   })
@@ -770,11 +778,40 @@ const visitorWorkflowActionSchema = z.object({
   params: z.object({ reference: applicationReference }),
   body: z.object({
     action: z.enum(['APPROVE', 'REJECT']),
-    notes: z.string().trim().min(3).max(2000).optional()
-  }).strict().refine(
-    (body) => body.action !== 'REJECT' || Boolean(body.notes),
-    { path: ['notes'], message: 'Rejection notes are required.' }
-  )
+    notes: z.string().trim().min(3).max(2000).optional(),
+    approved_visit_starts: isoDate.optional(),
+    approved_visit_ends: isoDate.optional(),
+    approved_areas_of_access: z.array(workflowCode).min(1).max(50)
+      .transform((areas) => [...new Set(areas)])
+      .optional(),
+    document_reviews: z.array(z.object({
+      document_key: workflowCode,
+      verdict: z.enum(['VALID', 'INVALID']),
+      notes: z.string().trim().min(3).max(1000).optional()
+    }).strict().refine(
+      (review) => review.verdict !== 'INVALID' || Boolean(review.notes),
+      { path: ['notes'], message: 'Invalid document reviews require notes.' }
+    )).max(13).optional()
+  }).strict().superRefine((body, context) => {
+    if (body.action === 'REJECT' && !body.notes) {
+      context.addIssue({
+        code: 'custom',
+        path: ['notes'],
+        message: 'Rejection notes are required.'
+      });
+    }
+    if (
+      body.approved_visit_starts
+      && body.approved_visit_ends
+      && body.approved_visit_ends < body.approved_visit_starts
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['approved_visit_ends'],
+        message: 'Approved visit end date must not be before its start date.'
+      });
+    }
+  })
 });
 
 const notificationEmailCategoryUpdateSchema = z.object({
@@ -862,6 +899,45 @@ const systemSessionRevokeSchema = z.object({
   params: z.object({ jti: uuid }),
   body: z.object({
     reason: z.string().trim().min(3).max(200).optional()
+  }).strict()
+});
+
+const accessAreaListSchema = z.object({
+  query: z.object({
+    include_inactive: z.enum(['true', 'false', '1', '0']).default('false').transform(
+      (value) => value === 'true' || value === '1'
+    )
+  }).strict()
+});
+
+const accessAreaCreateSchema = z.object({
+  body: z.object({
+    code: workflowCode,
+    name: z.string().trim().min(2).max(150),
+    description: z.string().trim().max(500).optional(),
+    sort_order: z.number().int().min(0).max(10000).default(0)
+  }).strict()
+});
+
+const accessAreaUpdateSchema = z.object({
+  params: z.object({ code: workflowCode }),
+  body: z.object({
+    name: z.string().trim().min(2).max(150).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    sort_order: z.number().int().min(0).max(10000).optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine((body) => Object.keys(body).length > 0, 'At least one field is required.')
+});
+
+const accessLevelAreaSchema = z.object({
+  params: z.object({ code: workflowCode })
+});
+
+const accessLevelAreaUpdateSchema = z.object({
+  params: z.object({ code: workflowCode }),
+  body: z.object({
+    area_codes: z.array(workflowCode).min(1).max(50)
+      .transform((areas) => [...new Set(areas)])
   }).strict()
 });
 
@@ -957,6 +1033,11 @@ module.exports = {
     approvedVisitorCardAssignment: approvedVisitorCardAssignmentSchema,
     approvedVisitorCardReturn: approvedVisitorCardReturnSchema,
     systemSessionList: systemSessionListSchema,
-    systemSessionRevoke: systemSessionRevokeSchema
+    systemSessionRevoke: systemSessionRevokeSchema,
+    accessAreaList: accessAreaListSchema,
+    accessAreaCreate: accessAreaCreateSchema,
+    accessAreaUpdate: accessAreaUpdateSchema,
+    accessLevelArea: accessLevelAreaSchema,
+    accessLevelAreaUpdate: accessLevelAreaUpdateSchema
   }
 };

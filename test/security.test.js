@@ -247,6 +247,8 @@ test('visitor application completes approval, check-in and check-out', async () 
     const visitStarts = toPortalDate(now);
     const vehicleAccessDate = toPortalDate(addDays(now, 2));
     const visitEnds = toPortalDate(addDays(now, 30));
+    const approvedVisitStarts = now.toISOString().slice(0, 10);
+    const approvedVisitEnds = addDays(now, 30).toISOString().slice(0, 10);
 
     const applicationBody = {
       personal_data: {
@@ -313,6 +315,59 @@ test('visitor application completes approval, check-in and check-out', async () 
     assert.equal(approved.status, 200);
     assert.equal((await approved.json()).status, 'UNDER_REVIEW');
 
+    const missingDocumentReviews = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${supervisorSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'APPROVE',
+          notes: 'Document review omitted intentionally.',
+          approved_visit_starts: approvedVisitStarts,
+          approved_visit_ends: approvedVisitEnds,
+          approved_areas_of_access: ['PASSENGER_TERMINAL']
+        })
+      }
+    );
+    assert.equal(missingDocumentReviews.status, 422);
+    assert.equal((await missingDocumentReviews.json()).code, 'DOCUMENT_REVIEWS_REQUIRED');
+
+    const invalidDocumentApproval = await fetch(
+      `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${supervisorSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'APPROVE',
+          notes: 'Invalid document cannot be approved.',
+          approved_visit_starts: approvedVisitStarts,
+          approved_visit_ends: approvedVisitEnds,
+          approved_areas_of_access: ['PASSENGER_TERMINAL'],
+          document_reviews: [
+            { document_key: 'IDENTITY_DOCUMENT', verdict: 'VALID' },
+            {
+              document_key: 'AVSEC_ENDORSED_LETTER',
+              verdict: 'INVALID',
+              notes: 'Signature cannot be verified.'
+            },
+            { document_key: 'PASSPORT_PHOTOGRAPH', verdict: 'VALID' },
+            { document_key: 'OTHER_DOCUMENT_1', verdict: 'VALID' }
+          ]
+        })
+      }
+    );
+    assert.equal(invalidDocumentApproval.status, 422);
+    assert.equal(
+      (await invalidDocumentApproval.json()).code,
+      'INVALID_DOCUMENTS_CANNOT_BE_APPROVED'
+    );
+
     const seniorApproved = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,
       {
@@ -321,10 +376,32 @@ test('visitor application completes approval, check-in and check-out', async () 
           authorization: `Bearer ${supervisorSession.token}`,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({ action: 'APPROVE', notes: 'Senior security verified.' })
+        body: JSON.stringify({
+          action: 'APPROVE',
+          notes: 'Senior security approved terminal access.',
+          approved_visit_starts: approvedVisitStarts,
+          approved_visit_ends: approvedVisitEnds,
+          approved_areas_of_access: ['PASSENGER_TERMINAL'],
+          document_reviews: [
+            { document_key: 'IDENTITY_DOCUMENT', verdict: 'VALID' },
+            { document_key: 'AVSEC_ENDORSED_LETTER', verdict: 'VALID' },
+            { document_key: 'PASSPORT_PHOTOGRAPH', verdict: 'VALID' },
+            { document_key: 'OTHER_DOCUMENT_1', verdict: 'VALID' }
+          ]
+        })
       }
     );
     assert.equal(seniorApproved.status, 200);
+    const seniorApprovedBody = await seniorApproved.json();
+    assert.equal(seniorApprovedBody.application.approved_visit_starts, approvedVisitStarts);
+    assert.equal(seniorApprovedBody.application.approved_visit_ends, approvedVisitEnds);
+    assert.equal(seniorApprovedBody.application.document_reviews.length, 4);
+    assert.equal(
+      seniorApprovedBody.application.document_reviews.every(
+        (review) => review.verdict === 'VALID' && review.reviewed_by === 'Test Supervisor'
+      ),
+      true
+    );
 
     const finalApproved = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/workflow/actions`,

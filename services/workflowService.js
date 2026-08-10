@@ -1,12 +1,21 @@
 const { v4: uuidv4 } = require('uuid');
 const { createSystemNotification } = require('./notificationService');
 const { promoteApprovedVisitor } = require('./approvedVisitorService');
+const { validateDocumentReviews } = require('./documentReviewService');
 
 const workflowError = (status, code, message) => {
   const error = new Error(message);
   error.status = status;
   error.code = code;
   return error;
+};
+
+const toDateOnly = (value) => {
+  if (typeof value === 'string') return value.slice(0, 10);
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 };
 
 const getNotificationTargets = async (executor, stageId) => {
@@ -157,13 +166,24 @@ const isEligibleForStage = async (executor, stageId, user) => {
 
 const executeVisitorWorkflowAction = async (
   executor,
-  { application, user, action, notes, requestId }
+  {
+    application,
+    user,
+    action,
+    notes,
+    approvedAreas,
+    approvedVisitStarts,
+    approvedVisitEnds,
+    documentReviews,
+    requestId
+  }
 ) => {
   let [instances] = await executor.execute(
     `SELECT instance.id, instance.status, instance.current_stage_id,
             stage_instance.id AS stage_instance_id,
             stage.sequence_number, stage.code, stage.name,
-            stage.allow_submitter_action, stage.require_different_actor
+            stage.allow_submitter_action, stage.require_different_actor,
+            stage.captures_access_approval
      FROM application_workflow_instances instance
      INNER JOIN application_stage_instances stage_instance
        ON stage_instance.workflow_instance_id = instance.id
@@ -180,7 +200,8 @@ const executeVisitorWorkflowAction = async (
       `SELECT instance.id, instance.status, instance.current_stage_id,
               stage_instance.id AS stage_instance_id,
               stage.sequence_number, stage.code, stage.name,
-              stage.allow_submitter_action, stage.require_different_actor
+              stage.allow_submitter_action, stage.require_different_actor,
+              stage.captures_access_approval
        FROM application_workflow_instances instance
        INNER JOIN application_stage_instances stage_instance
          ON stage_instance.workflow_instance_id = instance.id
@@ -228,6 +249,152 @@ const executeVisitorWorkflowAction = async (
         'A different officer must complete this stage.'
       );
     }
+  }
+
+  const hasAccessGrantFields = approvedAreas !== undefined
+    || approvedVisitStarts !== undefined
+    || approvedVisitEnds !== undefined
+    || documentReviews !== undefined;
+  if (hasAccessGrantFields && !current.captures_access_approval) {
+    throw workflowError(
+      422,
+      'ACCESS_GRANT_FIELDS_NOT_ALLOWED',
+      'Access grant fields may only be supplied at the designated supervisor stage.'
+    );
+  }
+
+  if (current.captures_access_approval) {
+    if (user.role !== 'supervisor') {
+      throw workflowError(
+        403,
+        'ACCESS_AREA_APPROVAL_ROLE_REQUIRED',
+        'Only a PSO or SSO with the supervisor role may complete the access grant review.'
+      );
+    }
+    if (!documentReviews) {
+      throw workflowError(
+        422,
+        'DOCUMENT_REVIEWS_REQUIRED',
+        'Every submitted document must be reviewed at this workflow stage.'
+      );
+    }
+    const reviewedDocuments = validateDocumentReviews(
+      application.supporting_documents,
+      documentReviews
+    );
+    await executor.execute(
+      'DELETE FROM application_document_reviews WHERE application_id = ?',
+      [application.id]
+    );
+    for (const review of reviewedDocuments) {
+      await executor.execute(
+        `INSERT INTO application_document_reviews
+         (application_id, document_key, document_url, verdict, notes, reviewed_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          application.id,
+          review.document_key,
+          review.document_url,
+          review.verdict,
+          review.notes || null,
+          user.id
+        ]
+      );
+    }
+  }
+
+  if (action === 'APPROVE' && current.captures_access_approval) {
+    if (!approvedAreas?.length) {
+      throw workflowError(
+        422,
+        'APPROVED_ACCESS_AREAS_REQUIRED',
+        'Approved access areas are required at this workflow stage.'
+      );
+    }
+    if (!approvedVisitStarts || !approvedVisitEnds) {
+      throw workflowError(
+        422,
+        'APPROVED_VISIT_DATES_REQUIRED',
+        'Approved visit start and end dates are required at this workflow stage.'
+      );
+    }
+    const requestedStart = toDateOnly(application.visit_starts);
+    const requestedEnd = toDateOnly(application.visit_ends);
+    if (approvedVisitStarts < requestedStart || approvedVisitEnds > requestedEnd) {
+      throw workflowError(
+        422,
+        'APPROVED_VISIT_DATES_OUTSIDE_REQUEST',
+        'Approved visit dates must remain within the applicant requested period.'
+      );
+    }
+    if (
+      application.identity_expiry_date
+      && approvedVisitEnds > toDateOnly(application.identity_expiry_date)
+    ) {
+      throw workflowError(
+        422,
+        'APPROVED_VISIT_AFTER_IDENTITY_EXPIRY',
+        'Approved access cannot extend beyond the identity document expiry date.'
+      );
+    }
+    if (documentReviews.some((review) => review.verdict === 'INVALID')) {
+      throw workflowError(
+        422,
+        'INVALID_DOCUMENTS_CANNOT_BE_APPROVED',
+        'An application with an invalid supporting document cannot be approved.'
+      );
+    }
+    const placeholders = approvedAreas.map(() => '?').join(', ');
+    const [areas] = await executor.query(
+      `SELECT code FROM access_areas
+       WHERE code IN (${placeholders}) AND is_active = 1`,
+      approvedAreas
+    );
+    if (areas.length !== approvedAreas.length) {
+      throw workflowError(
+        422,
+        'APPROVED_ACCESS_AREA_INVALID',
+        'One or more approved access areas are invalid or inactive.'
+      );
+    }
+    await executor.execute(
+      'DELETE FROM application_approved_access_areas WHERE application_id = ?',
+      [application.id]
+    );
+    for (const areaCode of approvedAreas) {
+      await executor.execute(
+        `INSERT INTO application_approved_access_areas
+         (application_id, area_code, approved_by)
+         VALUES (?, ?, ?)`,
+        [application.id, areaCode, user.id]
+      );
+    }
+    await executor.execute(
+      `UPDATE visitor_applications
+       SET approved_visit_starts = ?, approved_visit_ends = ?
+       WHERE id = ?`,
+      [approvedVisitStarts, approvedVisitEnds, application.id]
+    );
+  }
+
+  if (action === 'REJECT' && current.captures_access_approval) {
+    if (approvedAreas !== undefined || approvedVisitStarts || approvedVisitEnds) {
+      throw workflowError(
+        422,
+        'APPROVED_ACCESS_GRANT_NOT_ALLOWED_ON_REJECTION',
+        'Approved dates and areas must be omitted when rejecting an application.'
+      );
+    }
+    await executor.execute(
+      `UPDATE visitor_applications
+       SET approved_visit_starts = NULL, approved_visit_ends = NULL
+       WHERE id = ?`,
+      [application.id]
+    );
+    await executor.execute(
+      'DELETE FROM application_approved_access_areas WHERE application_id = ?',
+      [application.id]
+    );
   }
 
   await executor.execute(
