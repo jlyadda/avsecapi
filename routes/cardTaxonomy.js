@@ -14,14 +14,28 @@ const resources = {
     table: 'card_access_levels',
     cardColumn: 'access_level',
     resourceType: 'card_access_level',
-    responseKey: 'access_levels'
+    responseKey: 'access_levels',
+    createSchema: schemas.taxonomyCreate,
+    updateSchema: schemas.taxonomyUpdate,
+    extraSelect: '',
+    updateFields: ['name', 'description', 'sort_order', 'is_active']
   },
   categories: {
     path: 'card-categories',
     table: 'card_categories',
     cardColumn: 'category',
     resourceType: 'card_category',
-    responseKey: 'categories'
+    responseKey: 'categories',
+    createSchema: schemas.cardCategoryCreate,
+    updateSchema: schemas.cardCategoryUpdate,
+    extraSelect: ', can_assign_to_visitors',
+    updateFields: [
+      'name',
+      'description',
+      'sort_order',
+      'is_active',
+      'can_assign_to_visitors'
+    ]
   }
 };
 
@@ -35,7 +49,8 @@ const registerRoutes = (resource) => {
       try {
         const activeClause = req.validatedQuery.include_inactive ? '' : 'WHERE is_active = 1';
         const [items] = await db.query(
-          `SELECT id, code, name, description, sort_order, is_active, created_at, updated_at
+          `SELECT id, code, name, description, sort_order, is_active${resource.extraSelect},
+                  created_at, updated_at
            FROM ${resource.table}
            ${activeClause}
            ORDER BY sort_order, name`
@@ -43,7 +58,10 @@ const registerRoutes = (resource) => {
         return res.json({
           [resource.responseKey]: items.map((item) => ({
             ...item,
-            is_active: Boolean(item.is_active)
+            is_active: Boolean(item.is_active),
+            ...(resource.resourceType === 'card_category' && {
+              can_assign_to_visitors: Boolean(item.can_assign_to_visitors)
+            })
           }))
         });
       } catch (error) {
@@ -62,22 +80,25 @@ const registerRoutes = (resource) => {
     `/${resource.path}`,
     authenticateToken,
     authorizePermission(PERMISSIONS.MANAGE_CARD_INVENTORY),
-    validate(schemas.taxonomyCreate),
+    validate(resource.createSchema),
     async (req, res) => {
       const connection = await db.getConnection();
       try {
         await connection.beginTransaction();
         const id = uuidv4();
+        const isCategory = resource.resourceType === 'card_category';
         await connection.execute(
           `INSERT INTO ${resource.table}
-           (id, code, name, description, sort_order, created_by)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, code, name, description, sort_order${isCategory ? ', can_assign_to_visitors' : ''},
+            created_by)
+           VALUES (?, ?, ?, ?, ?${isCategory ? ', ?' : ''}, ?)`,
           [
             id,
             req.body.code,
             req.body.name,
             req.body.description || null,
             req.body.sort_order,
+            ...(isCategory ? [req.body.can_assign_to_visitors] : []),
             req.user.id
           ]
         );
@@ -91,12 +112,19 @@ const registerRoutes = (resource) => {
         });
         await connection.commit();
         const [rows] = await db.query(
-          `SELECT id, code, name, description, sort_order, is_active, created_at, updated_at
+          `SELECT id, code, name, description, sort_order, is_active${resource.extraSelect},
+                  created_at, updated_at
            FROM ${resource.table} WHERE id = ?`,
           [id]
         );
         return res.status(201).json({
-          item: { ...rows[0], is_active: Boolean(rows[0].is_active) }
+          item: {
+            ...rows[0],
+            is_active: Boolean(rows[0].is_active),
+            ...(isCategory && {
+              can_assign_to_visitors: Boolean(rows[0].can_assign_to_visitors)
+            })
+          }
         });
       } catch (error) {
         await connection.rollback();
@@ -125,7 +153,7 @@ const registerRoutes = (resource) => {
     `/${resource.path}/:id`,
     authenticateToken,
     authorizePermission(PERMISSIONS.MANAGE_CARD_INVENTORY),
-    validate(schemas.taxonomyUpdate),
+    validate(resource.updateSchema),
     async (req, res) => {
       const connection = await db.getConnection();
       try {
@@ -164,7 +192,7 @@ const registerRoutes = (resource) => {
 
         const updates = [];
         const parameters = [];
-        for (const field of ['name', 'description', 'sort_order', 'is_active']) {
+        for (const field of resource.updateFields) {
           if (req.body[field] !== undefined) {
             updates.push(`${field} = ?`);
             parameters.push(req.body[field]);
@@ -185,14 +213,18 @@ const registerRoutes = (resource) => {
         });
         await connection.commit();
         const [updatedRows] = await db.query(
-          `SELECT id, code, name, description, sort_order, is_active, created_at, updated_at
+          `SELECT id, code, name, description, sort_order, is_active${resource.extraSelect},
+                  created_at, updated_at
            FROM ${resource.table} WHERE id = ?`,
           [item.id]
         );
         return res.json({
           item: {
             ...updatedRows[0],
-            is_active: Boolean(updatedRows[0].is_active)
+            is_active: Boolean(updatedRows[0].is_active),
+            ...(resource.resourceType === 'card_category' && {
+              can_assign_to_visitors: Boolean(updatedRows[0].can_assign_to_visitors)
+            })
           }
         });
       } catch (error) {

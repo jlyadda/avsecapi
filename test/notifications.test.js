@@ -75,6 +75,22 @@ test('notification groups, broadcasts and inbox state are persisted', async () =
     assert.equal(groupResponse.status, 201);
     groupId = (await groupResponse.json()).group.id;
 
+    const groupsResponse = await fetch(`${baseUrl}/notification-groups`, {
+      headers: adminHeaders
+    });
+    assert.equal(groupsResponse.status, 200);
+    const listedGroup = (await groupsResponse.json()).groups.find(
+      (group) => group.id === groupId
+    );
+    assert.deepEqual(listedGroup.user_ids, [assistantId]);
+
+    const groupDetailResponse = await fetch(
+      `${baseUrl}/notification-groups/${groupId}`,
+      { headers: adminHeaders }
+    );
+    assert.equal(groupDetailResponse.status, 200);
+    assert.deepEqual((await groupDetailResponse.json()).group.user_ids, [assistantId]);
+
     const notificationResponse = await fetch(`${baseUrl}/notifications`, {
       method: 'POST',
       headers: adminHeaders,
@@ -91,6 +107,17 @@ test('notification groups, broadcasts and inbox state are persisted', async () =
     const notification = (await notificationResponse.json()).notification;
     notificationId = notification.id;
     assert.equal(notification.recipientCount, 1);
+
+    const sentResponse = await fetch(`${baseUrl}/notifications/sent?search=Night%20shift`, {
+      headers: adminHeaders
+    });
+    assert.equal(sentResponse.status, 200);
+    const sentBody = await sentResponse.json();
+    const sentBroadcast = sentBody.broadcasts.find((item) => item.id === notificationId);
+    assert.ok(sentBroadcast);
+    assert.equal(sentBroadcast.recipient_count, 1);
+    assert.deepEqual(sentBroadcast.targets, [{ type: 'GROUP', value: groupId }]);
+    assert.equal(sentBroadcast.delivery_totals.EMAIL.total, 1);
 
     const countResponse = await fetch(`${baseUrl}/notifications/unread-count`, {
       headers: assistantHeaders

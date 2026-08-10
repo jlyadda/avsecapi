@@ -37,6 +37,19 @@ const normalizeApprovedVisitor = (visitor) => {
   };
 };
 
+const assignmentEligibilitySql = `(
+  approved_visitor.status = 'APPROVED'
+  AND CURDATE() BETWEEN approved_visitor.valid_from AND approved_visitor.valid_until
+  AND card.id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM application_approved_access_areas approved_area
+    INNER JOIN access_areas area ON area.code = approved_area.area_code
+    WHERE approved_area.application_id = approved_visitor.application_id
+      AND area.is_active = 1
+  )
+)`;
+
 const approvedVisitorSelect = `
   SELECT approved_visitor.id, approved_visitor.application_id,
          approved_visitor.visitor_profile_id,
@@ -63,9 +76,7 @@ const approvedVisitorSelect = `
          END AS card_status,
          CURDATE() BETWEEN approved_visitor.valid_from AND approved_visitor.valid_until
            AS within_valid_period,
-         approved_visitor.status IN ('APPROVED','CHECKED_IN')
-           AND CURDATE() BETWEEN approved_visitor.valid_from AND approved_visitor.valid_until
-           AND card.id IS NULL AS pass_assignment_eligible
+         ${assignmentEligibilitySql} AS pass_assignment_eligible
   FROM visitors approved_visitor
   INNER JOIN avsec_visitors profile
     ON profile.id = approved_visitor.visitor_profile_id
@@ -80,7 +91,14 @@ router.get(
   validate(schemas.approvedVisitorList),
   async (req, res) => {
     try {
-      const { search, status, valid_on, page, page_size } = req.validatedQuery;
+      const {
+        search,
+        status,
+        valid_on,
+        eligible_for_card_assignment,
+        page,
+        page_size
+      } = req.validatedQuery;
       const conditions = [];
       const values = [];
       if (search) {
@@ -101,6 +119,13 @@ router.get(
       if (valid_on) {
         conditions.push('? BETWEEN approved_visitor.valid_from AND approved_visitor.valid_until');
         values.push(valid_on);
+      }
+      if (eligible_for_card_assignment !== undefined) {
+        conditions.push(
+          eligible_for_card_assignment
+            ? assignmentEligibilitySql
+            : `NOT ${assignmentEligibilitySql}`
+        );
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const [[count]] = await db.execute(

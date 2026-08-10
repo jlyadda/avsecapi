@@ -60,16 +60,65 @@ router.get(
          GROUP BY notification_group.id
          ORDER BY notification_group.name`
       );
+      const [members] = await db.query(
+        `SELECT member.group_id, member.user_id
+         FROM notification_group_members member
+         INNER JOIN user_profiles user ON user.id = member.user_id
+         WHERE user.is_active = 1
+         ORDER BY member.group_id, member.user_id`
+      );
       return res.json({
         groups: groups.map((group) => ({
           ...group,
           is_active: Boolean(group.is_active),
-          member_count: Number(group.member_count)
+          member_count: Number(group.member_count),
+          user_ids: members.filter((member) => member.group_id === group.id)
+            .map((member) => member.user_id)
         }))
       });
     } catch (error) {
       console.error(error);
       return sendError(res, 500, 'NOTIFICATION_GROUP_LIST_FAILED', 'Unable to list groups.');
+    }
+  }
+);
+
+router.get(
+  '/notification-groups/:id',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.MANAGE_NOTIFICATION_GROUPS),
+  validate(schemas.notificationGroupId),
+  async (req, res) => {
+    try {
+      const [groups] = await db.execute(
+        `SELECT id, name, description, is_active, created_at, updated_at
+         FROM notification_groups WHERE id = ?`,
+        [req.params.id]
+      );
+      if (!groups[0]) {
+        return sendError(res, 404, 'NOTIFICATION_GROUP_NOT_FOUND', 'Group not found.');
+      }
+      const [members] = await db.execute(
+        `SELECT user.id, user.user_name, user.full_name, user.email,
+                user.user_role AS role
+         FROM notification_group_members member
+         INNER JOIN user_profiles user ON user.id = member.user_id
+         WHERE member.group_id = ? AND user.is_active = 1
+         ORDER BY COALESCE(user.full_name, user.user_name)`,
+        [req.params.id]
+      );
+      return res.json({
+        group: {
+          ...groups[0],
+          is_active: Boolean(groups[0].is_active),
+          member_count: members.length,
+          user_ids: members.map((member) => member.id),
+          members
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(res, 500, 'NOTIFICATION_GROUP_LOAD_FAILED', 'Unable to load group.');
     }
   }
 );

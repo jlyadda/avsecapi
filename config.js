@@ -27,6 +27,7 @@ const envSchema = z.object({
   API_RATE_LIMIT_WINDOW_MINUTES: z.coerce.number().int().min(1).max(60).default(15),
   NOTIFICATION_WORKER_INTERVAL_MS: z.coerce.number().int().min(1000).max(60000)
     .default(10000),
+  AIRPORT_UTC_OFFSET: z.string().regex(/^[+-](?:0\d|1[0-4]):[0-5]\d$/).default('+03:00'),
   PUBLIC_APP_API_KEYS: z.string().default('').refine(
     (value) => value === '' || value.split(',').every((key) => key.trim().length >= 32),
     'Every public application API key must contain at least 32 characters.'

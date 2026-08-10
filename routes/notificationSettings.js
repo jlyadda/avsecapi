@@ -10,7 +10,7 @@ const router = express.Router();
 router.get(
   '/notification-settings/email-categories',
   authenticateToken,
-  authorizePermission(PERMISSIONS.MANAGE_NOTIFICATION_SETTINGS),
+  authorizePermission(PERMISSIONS.VIEW_NOTIFICATION_SETTINGS),
   async (req, res) => {
     try {
       const [categories] = await db.query(

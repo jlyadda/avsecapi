@@ -74,11 +74,14 @@ test('admins manage card taxonomy, bulk inventory and persisted reports', async 
       body: JSON.stringify({
         code: categoryCode,
         name: 'Escorted Test Visitor',
-        sort_order: 90
+        sort_order: 90,
+        can_assign_to_visitors: true
       })
     });
     assert.equal(categoryResponse.status, 201);
-    categoryId = (await categoryResponse.json()).item.id;
+    const createdCategory = (await categoryResponse.json()).item;
+    categoryId = createdCategory.id;
+    assert.equal(createdCategory.can_assign_to_visitors, true);
 
     const bulkResponse = await fetch(`${baseUrl}/access-cards/bulk`, {
       method: 'POST',

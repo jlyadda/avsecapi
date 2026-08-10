@@ -601,6 +601,33 @@ stages prohibit self-approval and require a different officer from officers who
 approved earlier stages. Rejection ends the workflow immediately; approval at
 the last stage sets the application to `APPROVED`.
 
+`FACILITATION_DESK` is a mandatory final stage. Manager and PSO/SSO approvals
+leave the application `UNDER_REVIEW`; they never create an approved visitor or
+make the applicant eligible for a pass. Only an officer assigned to the active
+Facilitation Desk stage can perform the final approval. Before accepting that
+action, the API verifies that PSO/SSO-approved dates and areas exist and that
+every submitted document has a `VALID` verdict. The final transaction changes
+the application to `APPROVED` and inserts it into the operational `visitors`
+register, after which a card can be assigned.
+
+The Facilitation Desk completes the same workflow action endpoint without
+resubmitting the PSO/SSO access grant:
+
+```http
+POST /api/visitor-applications/:reference/workflow/actions
+```
+
+```json
+{
+  "action": "APPROVE",
+  "notes": "Applicant verified at the Facilitation Desk and cleared for pass issuance."
+}
+```
+
+Successful completion returns `workflow.status: "APPROVED"` and the approved
+visitor record becomes searchable through
+`GET /api/visitors?eligible_for_card_assignment=true`.
+
 Applications retain the workflow version active when they were submitted.
 Activating a new version affects only later applications.
 
@@ -752,6 +779,7 @@ members from task eligibility without altering historical records.
 - `POST /api/application-workflows` — create a workflow container
 - `PATCH /api/application-workflows/:id` — update metadata or active state
 - `POST /api/application-workflows/:id/versions` — create a complete draft
+- `GET /api/application-workflows/:id/versions/:versionId` — reload one version
 - `POST /api/application-workflows/:id/versions/:versionId/activate` — activate a draft
 
 Create a draft version:
@@ -785,15 +813,29 @@ Create a draft version:
 Stages execute in array order. Assignee types are `ROLE`, `GROUP`, and `USER`.
 Group and user values must be UUIDs; role values must be known system roles.
 Every stage needs at least one assignee.
-Every workflow version must have exactly one stage with
+Every workflow version must use `SENIOR_SECURITY_REVIEW` as the only stage with
 `captures_access_approval: true`. That supervisor's dates and areas become the
 authoritative access grant used for validity checks and pass assignment.
 Requested dates, requested areas, submitted links, and review verdicts remain
 available separately for audit and comparison.
 
+Every workflow version must also end with the exact stage code
+`FACILITATION_DESK`. That stage must be assigned to at least one workflow group
+or the `security_assistant` role. Versions that omit or place Facilitation Desk
+before another stage are rejected with `400 VALIDATION_FAILED`. At runtime,
+malformed legacy workflows cannot grant final approval and return `409
+FACILITATION_DESK_FINAL_APPROVAL_REQUIRED`; incomplete PSO/SSO decisions return
+`409 VISITOR_ACCESS_GRANT_INCOMPLETE`.
+
 Versions are immutable after activation. To change a live workflow, create and
 activate a new draft. Activation retires the previously active visitor workflow
 version atomically and is audited.
+
+`GET /api/application-workflows/:id/versions/:versionId` returns workflow and
+version metadata, ordered stages, boolean policy flags, SLA values, and every
+`ROLE`, `GROUP`, and `USER` assignee with a display name. It is read-only and
+allows a super administrator to inspect or activate an older draft after a
+browser reload.
 
 ### `POST /api/visitor-applications/:reference/check-in`
 
@@ -1136,9 +1178,20 @@ visitor status synchronized.
 **Allowed roles:** `security_assistant`, `supervisor`, `audit`, `viewer`,
 `admin`, `super_admin`
 
-Supports `search`, `status`, `valid_on`, `page`, and `page_size`. Search covers
-application number, visitor name, identity number, company, and assigned card.
-`valid_on` uses ISO `YYYY-MM-DD`.
+Supports `search`, `status`, `valid_on`, `eligible_for_card_assignment`, `page`,
+and `page_size`. Search covers application number, visitor name, identity
+number, company, and assigned card. `valid_on` uses ISO `YYYY-MM-DD`.
+
+For the pass-assignment search screen, use:
+
+```http
+GET /api/visitors?search=Jonathan&eligible_for_card_assignment=true&page=1&page_size=20
+```
+
+The eligibility filter is authoritative. It returns only `APPROVED` visitors
+whose PSO/SSO-approved period includes the database date, who have at least one
+active approved access area, and who do not already hold a card. The frontend
+must not reproduce these rules from its local clock.
 
 Each visitor includes identity details, approved access-area codes and dates,
 approver display name, current card details, `within_valid_period`, and
@@ -1185,13 +1238,19 @@ Returns one approved visitor using the UUID from the `visitors` table.
 }
 ```
 
+Card numbers are trimmed, converted to uppercase, and validated before lookup.
 The visitor must be `APPROVED` or `CHECKED_IN`, within the approved access
 period, and have no active card. The selected card, access level, and category
-must all be active and available. Its access level must cover every area
-approved by the PSO/SSO. Assignment is transactional and audited. A card that
-does not cover the complete approved set returns `409
-CARD_ACCESS_LEVEL_MISMATCH` with `missing_areas`; an approved visitor without an
-area decision returns `409 VISITOR_HAS_NO_APPROVED_ACCESS_AREAS`.
+must all be active and available. The category must have
+`can_assign_to_visitors: true`, and the access level must cover every area
+approved by the PSO/SSO. Assignment is transactional and audited.
+
+Relevant conflicts are:
+
+- `CARD_CATEGORY_NOT_VISITOR_COMPATIBLE` when the category is not enabled for visitors.
+- `CARD_ACCESS_LEVEL_MISMATCH` with `missing_areas` when coverage is insufficient.
+- `VISITOR_HAS_NO_APPROVED_ACCESS_AREAS` when no active approved area exists.
+- `ACCESS_CARD_UNAVAILABLE` when the card is inactive, assigned, lost, damaged, or unavailable.
 
 ### `POST /api/visitors/:id/card-return`
 
@@ -1218,7 +1277,8 @@ them dynamically rather than maintaining a fixed enum.
 **Allowed roles:** all internal roles
 
 Both routes accept `include_inactive=true|false`. Responses contain stable
-`code`, editable `name`, `description`, `sort_order`, and `is_active`.
+`code`, editable `name`, `description`, `sort_order`, and `is_active`. Category
+responses also contain `can_assign_to_visitors`.
 
 ### Access Area Administration
 
@@ -1266,11 +1326,14 @@ remains append-only and unchanged.
   "code": "RAMP_ESCORT",
   "name": "Ramp Escort",
   "description": "Escorted ramp access",
-  "sort_order": 60
+  "sort_order": 60,
+  "can_assign_to_visitors": true
 }
 ```
 
-Codes are uppercase machine identifiers and cannot be renamed after creation.
+`can_assign_to_visitors` applies only to `POST /api/card-categories`; omit it
+when creating an access level. New categories default to `false`. Codes are
+uppercase machine identifiers and cannot be renamed after creation.
 
 ### `PATCH /api/card-access-levels/:id`
 
@@ -1279,7 +1342,10 @@ Codes are uppercase machine identifiers and cannot be renamed after creation.
 **Allowed roles:** `admin`, `super_admin`
 
 Editable fields are `name`, `description`, `sort_order`, and `is_active`.
-Deactivation returns `409` while active cards still reference the value.
+Categories additionally allow `can_assign_to_visitors`. Disabling that flag
+blocks future visitor assignments without changing historical or active
+assignments. Deactivation returns `409` while active cards still reference the
+value.
 
 ### `GET /api/access-cards`
 
@@ -1406,7 +1472,8 @@ number, return condition, and assignment status.
 
 The application must be `APPROVED` or `CHECKED_IN` and inside its approved date
 period. The card must be available, neither damaged nor lost, and its access
-level must cover every approved access area. Conflicts return `409`.
+level must cover every approved access area. Its category must also have
+`can_assign_to_visitors: true`. Conflicts return `409`.
 
 **Response — `200`:** `{ "application": {} }`
 
@@ -1654,6 +1721,37 @@ Returns summary counts for the internal administrative dashboard.
 
 The current statistics cover visitor applications and pending staff accounts. Vehicle-permit statistics are not yet included.
 
+### `GET /api/statistics/pass-assignments`
+
+Returns authoritative historical pass assignment and return counts from
+append-only card events.
+
+**Allowed roles:** `admin`, `super_admin`
+
+```http
+GET /api/statistics/pass-assignments?from=2026-08-01&to=2026-08-31&interval=day
+```
+
+`interval` is `day`, `week`, or `month`. The date range is inclusive and capped
+at 366 days. Empty periods are returned with zero counts. Events are grouped
+using the configured airport offset, `AIRPORT_UTC_OFFSET`, which defaults to
+`+03:00` for Kampala.
+
+```json
+{
+  "points": [
+    { "date": "2026-08-11", "assigned": 12, "returned": 9 }
+  ],
+  "totals": { "assigned": 120, "returned": 101 },
+  "range": {
+    "from": "2026-08-01",
+    "to": "2026-08-31",
+    "interval": "day",
+    "timezone_offset": "+03:00"
+  }
+}
+```
+
 ## Notifications
 
 Notifications support `IN_APP` and `EMAIL` channels and snapshot recipients at
@@ -1721,10 +1819,40 @@ Archives one notification for the authenticated user.
 Returns paginated channel status, recipient, attempt count, and sent timestamp.
 Provider error details are intentionally not returned.
 
+### `GET /api/notifications/sent`
+
+**Allowed roles:** `admin`, `super_admin`
+
+Supports `search`, `page`, and `page_size`. Administrators see broadcasts they
+created; super administrators see all user-created broadcasts. Each item
+contains creator metadata, channels, target summaries, snapshotted recipient
+count, and delivery totals grouped by channel and status. Use
+`GET /api/notifications/:id/deliveries` for individual recipient rows.
+
+```json
+{
+  "broadcasts": [
+    {
+      "id": "notification-uuid",
+      "title": "Night shift briefing",
+      "channels": ["IN_APP", "EMAIL"],
+      "targets": [{ "type": "GROUP", "value": "group-uuid" }],
+      "recipient_count": 12,
+      "delivery_totals": {
+        "IN_APP": { "sent": 12, "total": 12 },
+        "EMAIL": { "sent": 11, "failed": 1, "total": 12 }
+      }
+    }
+  ],
+  "pagination": {}
+}
+```
+
 ### Notification Groups
 
 ```http
 GET /api/notification-groups
+GET /api/notification-groups/:id
 POST /api/notification-groups
 PATCH /api/notification-groups/:id
 PUT /api/notification-groups/:id/members
@@ -1744,6 +1872,9 @@ Create a group:
 
 Replacing members uses `{ "user_ids": [] }`. Administrators cannot add
 `admin` or `super_admin` accounts to groups; super administrators can.
+The list response includes each group's current `user_ids`. The detail route
+also returns active member names, usernames, email addresses, and roles for a
+safe edit form after browser reload.
 
 ### System Triggers
 
@@ -1805,10 +1936,11 @@ without affecting in-app delivery.
 
 ### `GET /api/notification-settings/email-categories`
 
-**Allowed role:** `super_admin`
+**Allowed roles:** `admin`, `super_admin`
 
 Returns notification categories with their code, description, active state,
-and `email_enabled` state.
+and `email_enabled` state. Administrator access is read-only so template forms
+can discover active categories even when no template currently uses them.
 
 ### `PATCH /api/notification-settings/email-categories/:code`
 

@@ -62,11 +62,30 @@ test('super admins control system email categories without disabling in-app deli
       'content-type': 'application/json'
     };
 
-    const denied = await fetch(
+    const adminCategoryList = await fetch(
       `${baseUrl}/notification-settings/email-categories`,
       { headers: { authorization: `Bearer ${adminToken}` } }
     );
-    assert.equal(denied.status, 403);
+    assert.equal(adminCategoryList.status, 200);
+    assert.equal(
+      (await adminCategoryList.json()).categories.some(
+        (category) => category.code === 'ACCESS_CARDS'
+      ),
+      true
+    );
+
+    const deniedAdminUpdate = await fetch(
+      `${baseUrl}/notification-settings/email-categories/ACCESS_CARDS`,
+      {
+        method: 'PATCH',
+        headers: {
+          authorization: `Bearer ${adminToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ email_enabled: false })
+      }
+    );
+    assert.equal(deniedAdminUpdate.status, 403);
 
     const listResponse = await fetch(
       `${baseUrl}/notification-settings/email-categories`,

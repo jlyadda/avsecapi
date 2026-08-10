@@ -161,6 +161,8 @@ test('visitor application completes approval, check-in and check-out', async () 
   let vehicleApiKeyId;
   let vehicleApplicationId;
   let reviewerStageAssigneeId;
+  let supervisorStageAssigneeId;
+  let facilitationStageAssigneeId;
 
   try {
     await db.execute(
@@ -208,6 +210,43 @@ test('visitor application completes approval, check-in and check-out', async () 
        (id, stage_id, assignee_type, assignee_value)
        VALUES (?, ?, 'USER', ?)`,
       [reviewerStageAssigneeId, managerStage.id, adminId]
+    );
+    const [[supervisorStage]] = await db.query(
+      `SELECT stage.id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       INNER JOIN application_workflow_stages stage ON stage.version_id = version.id
+       WHERE workflow.application_type = 'VISITOR'
+         AND workflow.is_active = 1
+         AND stage.code = 'SENIOR_SECURITY_REVIEW'
+       LIMIT 1`
+    );
+    supervisorStageAssigneeId = uuidv4();
+    await db.execute(
+      `INSERT INTO workflow_stage_assignees
+       (id, stage_id, assignee_type, assignee_value)
+       VALUES (?, ?, 'USER', ?)`,
+      [supervisorStageAssigneeId, supervisorStage.id, supervisorId]
+    );
+    const [[facilitationStage]] = await db.query(
+      `SELECT stage.id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       INNER JOIN application_workflow_stages stage
+         ON stage.version_id = version.id
+       WHERE workflow.application_type = 'VISITOR'
+         AND workflow.is_active = 1
+         AND stage.code = 'FACILITATION_DESK'
+       LIMIT 1`
+    );
+    facilitationStageAssigneeId = uuidv4();
+    await db.execute(
+      `INSERT INTO workflow_stage_assignees
+       (id, stage_id, assignee_type, assignee_value)
+       VALUES (?, ?, 'USER', ?)`,
+      [facilitationStageAssigneeId, facilitationStage.id, assistantId]
     );
 
     const { port } = server.address();
@@ -502,6 +541,18 @@ test('visitor application completes approval, check-in and check-out', async () 
       await db.execute(
         'DELETE FROM workflow_stage_assignees WHERE id = ?',
         [reviewerStageAssigneeId]
+      );
+    }
+    if (supervisorStageAssigneeId) {
+      await db.execute(
+        'DELETE FROM workflow_stage_assignees WHERE id = ?',
+        [supervisorStageAssigneeId]
+      );
+    }
+    if (facilitationStageAssigneeId) {
+      await db.execute(
+        'DELETE FROM workflow_stage_assignees WHERE id = ?',
+        [facilitationStageAssigneeId]
       );
     }
     if (vehicleApplicationId) {

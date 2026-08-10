@@ -118,6 +118,24 @@ test('super admin creates and activates an immutable visitor workflow version', 
     assert.equal(workflowResponse.status, 201);
     workflowId = (await workflowResponse.json()).workflow.id;
 
+    const invalidFinalStage = await fetch(
+      `${baseUrl}/application-workflows/${workflowId}/versions`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          stages: [{
+            code: 'SENIOR_SECURITY_REVIEW',
+            name: 'PSO or SSO Review',
+            captures_access_approval: true,
+            assignees: [{ type: 'GROUP', value: groupId }]
+          }]
+        })
+      }
+    );
+    assert.equal(invalidFinalStage.status, 400);
+    assert.equal((await invalidFinalStage.json()).code, 'VALIDATION_FAILED');
+
     const versionResponse = await fetch(
       `${baseUrl}/application-workflows/${workflowId}/versions`,
       {
@@ -126,14 +144,14 @@ test('super admin creates and activates an immutable visitor workflow version', 
         body: JSON.stringify({
           stages: [
             {
-              code: 'CUSTOM_MANAGER_REVIEW',
-              name: 'Custom Manager Review',
+              code: 'SENIOR_SECURITY_REVIEW',
+              name: 'PSO or SSO Review',
               sla_hours: 12,
               captures_access_approval: true,
               assignees: [{ type: 'GROUP', value: groupId }]
             },
             {
-              code: 'CUSTOM_FACILITATION',
+              code: 'FACILITATION_DESK',
               name: 'Custom Facilitation',
               require_different_actor: true,
               assignees: [{ type: 'ROLE', value: 'security_assistant' }]
@@ -147,6 +165,20 @@ test('super admin creates and activates an immutable visitor workflow version', 
     versionId = version.id;
     assert.equal(version.status, 'DRAFT');
     assert.equal(version.stages.length, 2);
+
+    const versionDetailResponse = await fetch(
+      `${baseUrl}/application-workflows/${workflowId}/versions/${versionId}`,
+      { headers }
+    );
+    assert.equal(versionDetailResponse.status, 200);
+    const versionDetail = (await versionDetailResponse.json()).version;
+    assert.equal(versionDetail.id, versionId);
+    assert.equal(versionDetail.stages[0].code, 'SENIOR_SECURITY_REVIEW');
+    assert.equal(versionDetail.stages[0].captures_access_approval, true);
+    assert.deepEqual(
+      versionDetail.stages[1].assignees.map((assignee) => assignee.value),
+      ['security_assistant']
+    );
 
     const activation = await fetch(
       `${baseUrl}/application-workflows/${workflowId}/versions/${versionId}/activate`,

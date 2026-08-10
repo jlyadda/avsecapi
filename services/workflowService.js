@@ -478,6 +478,26 @@ const executeVisitorWorkflowAction = async (
     };
   }
 
+  if (current.code !== 'FACILITATION_DESK') {
+    throw workflowError(
+      409,
+      'FACILITATION_DESK_FINAL_APPROVAL_REQUIRED',
+      'A visitor can only receive final approval from the Facilitation Desk stage.'
+    );
+  }
+  const accessGrantComplete = application.approved_visit_starts
+    && application.approved_visit_ends
+    && application.approved_areas_of_access?.length > 0
+    && application.document_reviews?.length === application.submitted_documents?.length
+    && application.document_reviews.every((review) => review.verdict === 'VALID');
+  if (!accessGrantComplete) {
+    throw workflowError(
+      409,
+      'VISITOR_ACCESS_GRANT_INCOMPLETE',
+      'PSO/SSO approved dates, areas, and valid document reviews are required before final approval.'
+    );
+  }
+
   await executor.execute(
     `UPDATE application_workflow_instances
      SET status = 'APPROVED', current_stage_id = NULL, completed_at = NOW(3)

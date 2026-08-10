@@ -41,10 +41,14 @@ test('internal application, card, account, user list and refresh workflows', asy
   const assistantId = uuidv4();
   let cardId;
   let incompatibleCardId;
+  let incompatibleCategoryCardId;
+  let incompatibleCategoryId;
   const identityNumber = `OPS${Date.now()}`;
   const password = 'InitialPassword12!';
   let applicationId;
   let managerStageAssigneeId;
+  let supervisorStageAssigneeId;
+  let facilitationStageAssigneeId;
 
   try {
     const passwordHash = await bcrypt.hash(password, 12);
@@ -117,6 +121,43 @@ test('internal application, card, account, user list and refresh workflows', asy
        (id, stage_id, assignee_type, assignee_value)
        VALUES (?, ?, 'USER', ?)`,
       [managerStageAssigneeId, managerStage.id, managerId]
+    );
+    const [[supervisorStage]] = await db.query(
+      `SELECT stage.id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       INNER JOIN application_workflow_stages stage ON stage.version_id = version.id
+       WHERE workflow.application_type = 'VISITOR'
+         AND workflow.is_active = 1
+         AND stage.code = 'SENIOR_SECURITY_REVIEW'
+       LIMIT 1`
+    );
+    supervisorStageAssigneeId = uuidv4();
+    await db.execute(
+      `INSERT INTO workflow_stage_assignees
+       (id, stage_id, assignee_type, assignee_value)
+       VALUES (?, ?, 'USER', ?)`,
+      [supervisorStageAssigneeId, supervisorStage.id, supervisorId]
+    );
+    const [[facilitationStage]] = await db.query(
+      `SELECT stage.id
+       FROM application_workflows workflow
+       INNER JOIN application_workflow_versions version
+         ON version.id = workflow.active_version_id
+       INNER JOIN application_workflow_stages stage
+         ON stage.version_id = version.id
+       WHERE workflow.application_type = 'VISITOR'
+         AND workflow.is_active = 1
+         AND stage.code = 'FACILITATION_DESK'
+       LIMIT 1`
+    );
+    facilitationStageAssigneeId = uuidv4();
+    await db.execute(
+      `INSERT INTO workflow_stage_assignees
+       (id, stage_id, assignee_type, assignee_value)
+       VALUES (?, ?, 'USER', ?)`,
+      [facilitationStageAssigneeId, facilitationStage.id, assistantId]
     );
     const { port } = server.address();
     const baseUrl = `http://127.0.0.1:${port}/api`;
@@ -226,6 +267,32 @@ test('internal application, card, account, user list and refresh workflows', asy
     const incompatibleCard = (await incompatibleCardResponse.json()).card;
     incompatibleCardId = incompatibleCard.id;
 
+    const categoryCode = `NON_VISITOR_${uuidv4().slice(0, 8).toUpperCase()}`;
+    const incompatibleCategoryDefinition = await fetch(`${baseUrl}/card-categories`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        code: categoryCode,
+        name: 'Non-visitor test category',
+        can_assign_to_visitors: false
+      })
+    });
+    assert.equal(incompatibleCategoryDefinition.status, 201);
+    incompatibleCategoryId = (await incompatibleCategoryDefinition.json()).item.id;
+
+    const incompatibleCategoryResponse = await fetch(`${baseUrl}/access-cards`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        number: `STAFF${uuidv4().slice(0, 8)}`,
+        access_level: 'LEVEL_1',
+        category: categoryCode
+      })
+    });
+    assert.equal(incompatibleCategoryResponse.status, 201);
+    const incompatibleCategoryCard = (await incompatibleCategoryResponse.json()).card;
+    incompatibleCategoryCardId = incompatibleCategoryCard.id;
+
     const managerApproved = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/decision`,
       {
@@ -289,6 +356,13 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.deepEqual(approvedVisitor.approved_areas_of_access, ['PUBLIC_AREAS']);
     assert.equal(Boolean(approvedVisitor.pass_assignment_eligible), true);
 
+    const eligibleVisitorsResponse = await fetch(
+      `${baseUrl}/visitors?search=${identityNumber}&eligible_for_card_assignment=true`,
+      { headers: { authorization: `Bearer ${assistantSession.token}` } }
+    );
+    assert.equal(eligibleVisitorsResponse.status, 200);
+    assert.equal((await eligibleVisitorsResponse.json()).pagination.total, 1);
+
     const workflowHistory = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/workflow`,
       { headers }
@@ -317,6 +391,23 @@ test('internal application, card, account, user list and refresh workflows', asy
     const incompatibleAssignmentBody = await incompatibleAssignment.json();
     assert.equal(incompatibleAssignmentBody.code, 'CARD_ACCESS_LEVEL_MISMATCH');
     assert.deepEqual(incompatibleAssignmentBody.missing_areas, ['PUBLIC_AREAS']);
+
+    const incompatibleCategoryAssignment = await fetch(
+      `${baseUrl}/visitors/${approvedVisitor.id}/card-assignment`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${assistantSession.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ card_number: incompatibleCategoryCard.number.toLowerCase() })
+      }
+    );
+    assert.equal(incompatibleCategoryAssignment.status, 409);
+    assert.equal(
+      (await incompatibleCategoryAssignment.json()).code,
+      'CARD_CATEGORY_NOT_VISITOR_COMPATIBLE'
+    );
 
     const assigned = await fetch(
       `${baseUrl}/visitors/${approvedVisitor.id}/card-assignment`,
@@ -371,6 +462,17 @@ test('internal application, card, account, user list and refresh workflows', asy
     );
     assert.equal(returned.status, 200);
 
+    const assignmentStatistics = await fetch(
+      `${baseUrl}/statistics/pass-assignments?from=${today}&to=${today}&interval=day`,
+      { headers }
+    );
+    assert.equal(assignmentStatistics.status, 200);
+    const assignmentStatisticsBody = await assignmentStatistics.json();
+    const todayPoint = assignmentStatisticsBody.points.find((point) => point.date === today);
+    assert.ok(todayPoint);
+    assert.equal(todayPoint.assigned >= 1, true);
+    assert.equal(todayPoint.returned >= 1, true);
+
     const accountUpdate = await fetch(`${baseUrl}/account`, {
       method: 'PATCH',
       headers,
@@ -410,13 +512,25 @@ test('internal application, card, account, user list and refresh workflows', asy
         [managerStageAssigneeId]
       );
     }
+    if (supervisorStageAssigneeId) {
+      await db.execute(
+        'DELETE FROM workflow_stage_assignees WHERE id = ?',
+        [supervisorStageAssigneeId]
+      );
+    }
+    if (facilitationStageAssigneeId) {
+      await db.execute(
+        'DELETE FROM workflow_stage_assignees WHERE id = ?',
+        [facilitationStageAssigneeId]
+      );
+    }
     if (applicationId) {
       await db.execute('DELETE FROM notifications WHERE resource_id = ?', [applicationId]);
     }
     await db.execute(
       `DELETE FROM audit_events
        WHERE actor_id IN (?, ?, ?, ?)
-         OR resource_id IN (?, ?, ?)`,
+         OR resource_id IN (?, ?, ?, ?)`,
       [
         adminId,
         managerId,
@@ -424,7 +538,8 @@ test('internal application, card, account, user list and refresh workflows', asy
         assistantId,
         applicationId || '',
         cardId || '',
-        incompatibleCardId || ''
+        incompatibleCardId || '',
+        incompatibleCategoryCardId || ''
       ]
     );
     if (applicationId) {
@@ -440,6 +555,13 @@ test('internal application, card, account, user list and refresh workflows', asy
     if (incompatibleCardId) {
       await db.execute('DELETE FROM card_events WHERE card_id = ?', [incompatibleCardId]);
       await db.execute('DELETE FROM access_cards WHERE id = ?', [incompatibleCardId]);
+    }
+    if (incompatibleCategoryCardId) {
+      await db.execute('DELETE FROM card_events WHERE card_id = ?', [incompatibleCategoryCardId]);
+      await db.execute('DELETE FROM access_cards WHERE id = ?', [incompatibleCategoryCardId]);
+    }
+    if (incompatibleCategoryId) {
+      await db.execute('DELETE FROM card_categories WHERE id = ?', [incompatibleCategoryId]);
     }
     await db.execute('DELETE FROM avsec_visitors WHERE identity_number = ?', [identityNumber]);
     await db.execute(

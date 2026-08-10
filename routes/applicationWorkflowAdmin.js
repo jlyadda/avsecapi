@@ -263,6 +263,104 @@ router.get(
   }
 );
 
+router.get(
+  '/application-workflows/:id/versions/:versionId',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.MANAGE_APPLICATION_WORKFLOWS),
+  validate(schemas.applicationWorkflowVersionId),
+  async (req, res) => {
+    try {
+      const [versions] = await db.execute(
+        `SELECT workflow.id AS workflow_id, workflow.code AS workflow_code,
+                workflow.name AS workflow_name,
+                version.id, version.version_number, version.status,
+                version.activated_at, version.created_at,
+                version.created_by AS created_by_id,
+                COALESCE(user.full_name, user.user_name) AS created_by
+         FROM application_workflow_versions version
+         INNER JOIN application_workflows workflow ON workflow.id = version.workflow_id
+         LEFT JOIN user_profiles user ON user.id = version.created_by
+         WHERE workflow.id = ? AND version.id = ?`,
+        [req.params.id, req.params.versionId]
+      );
+      const version = versions[0];
+      if (!version) {
+        return sendError(res, 404, 'WORKFLOW_VERSION_NOT_FOUND', 'Workflow version not found.');
+      }
+      const [stages] = await db.execute(
+        `SELECT id, sequence_number, code, name, description, approval_policy,
+                allow_submitter_action, require_different_actor, sla_hours,
+                captures_access_approval
+         FROM application_workflow_stages
+         WHERE version_id = ?
+         ORDER BY sequence_number`,
+        [version.id]
+      );
+      const assignees = stages.length === 0 ? [] : (await db.execute(
+        `SELECT assignee.stage_id, assignee.assignee_type, assignee.assignee_value,
+                CASE
+                  WHEN assignee.assignee_type = 'GROUP' THEN workflow_group.name
+                  WHEN assignee.assignee_type = 'USER'
+                    THEN COALESCE(user.full_name, user.user_name)
+                  ELSE assignee.assignee_value
+                END AS display_name
+         FROM workflow_stage_assignees assignee
+         LEFT JOIN workflow_groups workflow_group
+           ON assignee.assignee_type = 'GROUP'
+          AND workflow_group.id = assignee.assignee_value
+         LEFT JOIN user_profiles user
+           ON assignee.assignee_type = 'USER'
+          AND user.id = assignee.assignee_value
+         WHERE assignee.stage_id IN (${stages.map(() => '?').join(', ')})
+         ORDER BY assignee.stage_id, assignee.assignee_type, assignee.assignee_value`,
+        stages.map((stage) => stage.id)
+      ))[0];
+      return res.json({
+        workflow: {
+          id: version.workflow_id,
+          code: version.workflow_code,
+          name: version.workflow_name
+        },
+        version: {
+          id: version.id,
+          version_number: Number(version.version_number),
+          status: version.status,
+          created_at: version.created_at,
+          created_by_id: version.created_by_id,
+          created_by: version.created_by,
+          activated_at: version.activated_at,
+          stages: stages.map((stage) => ({
+            id: stage.id,
+            sequence: Number(stage.sequence_number),
+            code: stage.code,
+            name: stage.name,
+            description: stage.description,
+            approval_policy: stage.approval_policy,
+            sla_hours: stage.sla_hours === null ? null : Number(stage.sla_hours),
+            allow_submitter_action: Boolean(stage.allow_submitter_action),
+            require_different_actor: Boolean(stage.require_different_actor),
+            captures_access_approval: Boolean(stage.captures_access_approval),
+            assignees: assignees.filter((assignee) => assignee.stage_id === stage.id)
+              .map((assignee) => ({
+                type: assignee.assignee_type,
+                value: assignee.assignee_value,
+                display_name: assignee.display_name
+              }))
+          }))
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'WORKFLOW_VERSION_LOAD_FAILED',
+        'Unable to load workflow version.'
+      );
+    }
+  }
+);
+
 router.post(
   '/application-workflows',
   authenticateToken,

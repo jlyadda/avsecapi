@@ -8,6 +8,16 @@ const { recordAudit, sendError } = require('../audit');
 
 const router = express.Router();
 
+const parseJson = (value, fallback) => {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
 router.get(
   '/notifications',
   authenticateToken,
@@ -94,6 +104,115 @@ router.get('/notifications/unread-count', authenticateToken, async (req, res) =>
     );
   }
 });
+
+router.get(
+  '/notifications/sent',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.SEND_NOTIFICATIONS),
+  validate(schemas.notificationSentList),
+  async (req, res) => {
+    try {
+      const { search, page, page_size } = req.validatedQuery;
+      const conditions = ["notification.source = 'USER'"];
+      const parameters = [];
+      if (req.user.role !== 'super_admin') {
+        conditions.push('notification.actor_id = ?');
+        parameters.push(req.user.id);
+      }
+      if (search) {
+        const value = `%${search}%`;
+        conditions.push(`(
+          notification.title LIKE ? OR notification.body LIKE ? OR notification.type LIKE ?
+        )`);
+        parameters.push(value, value, value);
+      }
+      const where = `WHERE ${conditions.join(' AND ')}`;
+      const [[countRow]] = await db.execute(
+        `SELECT COUNT(*) AS total FROM notifications notification ${where}`,
+        parameters
+      );
+      const total = Number(countRow.total);
+      const [broadcasts] = await db.execute(
+        `SELECT notification.id, notification.type, notification.title,
+                notification.body, notification.priority, notification.channels,
+                notification.metadata, notification.scheduled_at,
+                notification.expires_at, notification.created_at,
+                notification.actor_id AS created_by_id,
+                COALESCE(user.full_name, user.user_name) AS created_by,
+                (SELECT COUNT(*) FROM notification_recipients recipient
+                 WHERE recipient.notification_id = notification.id) AS recipient_count
+         FROM notifications notification
+         LEFT JOIN user_profiles user ON user.id = notification.actor_id
+         ${where}
+         ORDER BY notification.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...parameters, page_size, (page - 1) * page_size]
+      );
+      const ids = broadcasts.map((broadcast) => broadcast.id);
+      let targets = [];
+      let deliveryRows = [];
+      if (ids.length > 0) {
+        const placeholders = ids.map(() => '?').join(', ');
+        [targets] = await db.query(
+          `SELECT notification_id, target_type, target_value
+           FROM notification_targets
+           WHERE notification_id IN (${placeholders})
+           ORDER BY notification_id, target_type, target_value`,
+          ids
+        );
+        [deliveryRows] = await db.query(
+          `SELECT notification_id, channel, status, COUNT(*) AS total
+           FROM notification_deliveries
+           WHERE notification_id IN (${placeholders})
+           GROUP BY notification_id, channel, status
+           ORDER BY notification_id, channel, status`,
+          ids
+        );
+      }
+      return res.json({
+        broadcasts: broadcasts.map((broadcast) => {
+          const deliveryTotals = {};
+          for (const delivery of deliveryRows.filter(
+            (row) => row.notification_id === broadcast.id
+          )) {
+            if (!deliveryTotals[delivery.channel]) {
+              deliveryTotals[delivery.channel] = { total: 0 };
+            }
+            const count = Number(delivery.total);
+            deliveryTotals[delivery.channel][delivery.status.toLowerCase()] = count;
+            deliveryTotals[delivery.channel].total += count;
+          }
+          return {
+            ...broadcast,
+            channels: parseJson(broadcast.channels, []),
+            metadata: parseJson(broadcast.metadata, {}),
+            recipient_count: Number(broadcast.recipient_count),
+            targets: targets.filter((target) => target.notification_id === broadcast.id)
+              .map((target) => ({
+                type: target.target_type,
+                value: target.target_value
+              })),
+            delivery_totals: deliveryTotals
+          };
+        }),
+        pagination: {
+          page,
+          page_size,
+          total,
+          total_pages: Math.ceil(total / page_size)
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'SENT_NOTIFICATION_LIST_FAILED',
+        'Unable to load sent broadcasts.'
+      );
+    }
+  }
+);
 
 router.post(
   '/notifications',

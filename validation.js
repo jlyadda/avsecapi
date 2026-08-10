@@ -349,6 +349,16 @@ const taxonomyCreateSchema = z.object({
   }).strict()
 });
 
+const cardCategoryCreateSchema = z.object({
+  body: z.object({
+    code: cardTaxonomyCode,
+    name: z.string().trim().min(2).max(100),
+    description: z.string().trim().max(500).optional(),
+    sort_order: z.number().int().min(0).max(10000).default(0),
+    can_assign_to_visitors: z.boolean().default(false)
+  }).strict()
+});
+
 const taxonomyUpdateSchema = z.object({
   params: z.object({ id: uuid }),
   body: z.object({
@@ -359,6 +369,20 @@ const taxonomyUpdateSchema = z.object({
   }).strict().refine(
     (body) => Object.keys(body).length > 0,
     'At least one taxonomy field is required.'
+  )
+});
+
+const cardCategoryUpdateSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({
+    name: z.string().trim().min(2).max(100).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    sort_order: z.number().int().min(0).max(10000).optional(),
+    is_active: z.boolean().optional(),
+    can_assign_to_visitors: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one category field is required.'
   )
 });
 
@@ -500,6 +524,14 @@ const notificationDeliveryListSchema = z.object({
   }).strict()
 });
 
+const notificationSentListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    page: paginationQuery.page,
+    page_size: z.coerce.number().int().min(1).max(100).default(50)
+  }).strict()
+});
+
 const notificationGroupCreateSchema = z.object({
   body: z.object({
     name: z.string().trim().min(2).max(150),
@@ -525,6 +557,35 @@ const notificationGroupMembersSchema = z.object({
   body: z.object({
     user_ids: z.array(uuid).max(500)
   }).strict()
+});
+
+const notificationGroupIdSchema = z.object({
+  params: z.object({ id: uuid })
+});
+
+const passAssignmentStatisticsSchema = z.object({
+  query: z.object({
+    from: isoDate,
+    to: isoDate,
+    interval: z.enum(['day', 'week', 'month']).default('day')
+  }).strict().superRefine((query, context) => {
+    const from = new Date(`${query.from}T00:00:00Z`);
+    const to = new Date(`${query.to}T00:00:00Z`);
+    const days = Math.floor((to - from) / 86400000);
+    if (days < 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['to'],
+        message: 'End date must not be before start date.'
+      });
+    } else if (days > 366) {
+      context.addIssue({
+        code: 'custom',
+        path: ['to'],
+        message: 'Statistics range cannot exceed 366 days.'
+      });
+    }
+  })
 });
 
 const cardAssignmentSchema = z.object({
@@ -753,11 +814,32 @@ const applicationWorkflowVersionCreateSchema = z.object({
         message: 'Stage codes must be unique.'
       });
     }
-    if (body.stages.filter((stage) => stage.captures_access_approval).length !== 1) {
+    const accessGrantStages = body.stages.filter((stage) => stage.captures_access_approval);
+    if (
+      accessGrantStages.length !== 1
+      || accessGrantStages[0].code !== 'SENIOR_SECURITY_REVIEW'
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['stages'],
-        message: 'Exactly one workflow stage must approve access areas.'
+        message: 'SENIOR_SECURITY_REVIEW must be the only stage that approves the access grant.'
+      });
+    }
+    const finalStage = body.stages.at(-1);
+    if (finalStage?.code !== 'FACILITATION_DESK') {
+      context.addIssue({
+        code: 'custom',
+        path: ['stages', body.stages.length - 1, 'code'],
+        message: 'The final workflow stage must use the FACILITATION_DESK code.'
+      });
+    } else if (!finalStage.assignees.some((assignee) => (
+      assignee.type === 'GROUP'
+      || (assignee.type === 'ROLE' && assignee.value === 'security_assistant')
+    ))) {
+      context.addIssue({
+        code: 'custom',
+        path: ['stages', body.stages.length - 1, 'assignees'],
+        message: 'Facilitation Desk must be assigned to a group or security_assistant role.'
       });
     }
   })
@@ -864,6 +946,9 @@ const approvedVisitorListSchema = z.object({
     status: z.enum(['APPROVED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED', 'REVOKED'])
       .optional(),
     valid_on: isoDate.optional(),
+    eligible_for_card_assignment: z.enum(['true', 'false', '1', '0']).transform(
+      (value) => value === 'true' || value === '1'
+    ).optional(),
     ...paginationQuery
   }).strict()
 });
@@ -875,7 +960,8 @@ const approvedVisitorIdSchema = z.object({
 const approvedVisitorCardAssignmentSchema = z.object({
   params: z.object({ id: uuid }),
   body: z.object({
-    card_number: z.string().trim().min(1).max(100)
+    card_number: z.string().trim().toUpperCase()
+      .min(2).max(100).regex(/^[A-Z0-9/_-]+$/)
   }).strict()
 });
 
@@ -998,6 +1084,8 @@ module.exports = {
     taxonomyList: taxonomyListSchema,
     taxonomyCreate: taxonomyCreateSchema,
     taxonomyUpdate: taxonomyUpdateSchema,
+    cardCategoryCreate: cardCategoryCreateSchema,
+    cardCategoryUpdate: cardCategoryUpdateSchema,
     reconciliationReportCreate: reconciliationReportCreateSchema,
     reconciliationReportList: reconciliationReportListSchema,
     reconciliationReportId: reconciliationReportIdSchema,
@@ -1006,9 +1094,12 @@ module.exports = {
     notificationId: notificationIdSchema,
     notificationReadAll: notificationReadAllSchema,
     notificationDeliveryList: notificationDeliveryListSchema,
+    notificationSentList: notificationSentListSchema,
     notificationGroupCreate: notificationGroupCreateSchema,
     notificationGroupUpdate: notificationGroupUpdateSchema,
     notificationGroupMembers: notificationGroupMembersSchema,
+    notificationGroupId: notificationGroupIdSchema,
+    passAssignmentStatistics: passAssignmentStatisticsSchema,
     cardAssignment: cardAssignmentSchema,
     cardReturn: cardReturnSchema,
     accountUpdate: accountUpdateSchema,

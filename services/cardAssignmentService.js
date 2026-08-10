@@ -37,7 +37,8 @@ const assignAccessCard = async (
 
   const [cardRows] = await executor.execute(
     `SELECT card.*, level.is_active AS access_level_is_active,
-            category.is_active AS category_is_active
+            category.is_active AS category_is_active,
+            category.can_assign_to_visitors
      FROM access_cards card
      INNER JOIN card_access_levels level ON level.code = card.access_level
      INNER JOIN card_categories category ON category.code = card.category
@@ -62,6 +63,13 @@ const assignAccessCard = async (
       409,
       'ACCESS_CARD_UNAVAILABLE',
       'Access card is not available for assignment.'
+    );
+  }
+  if (!card.can_assign_to_visitors) {
+    throw cardError(
+      409,
+      'CARD_CATEGORY_NOT_VISITOR_COMPATIBLE',
+      'This card category cannot be assigned to visitors.'
     );
   }
 
