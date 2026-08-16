@@ -53,6 +53,7 @@ router.post(
     const {
       user_name,
       email,
+      phone,
       password,
       full_name,
       department,
@@ -75,13 +76,14 @@ router.post(
       await connection.beginTransaction();
       await connection.execute(
         `INSERT INTO user_profiles
-         (id, user_name, email, password_hash, full_name, department, user_role,
+         (id, user_name, email, phone, password_hash, full_name, department, user_role,
           is_active, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newUserId,
           user_name,
           email,
+          phone || null,
           passwordHash,
           full_name || null,
           department || 'Aviation Security',
@@ -117,6 +119,7 @@ router.post(
           id: newUserId,
           user_name,
           email,
+          phone: phone || null,
           full_name: full_name || null,
           department: department || 'Aviation Security',
           role,
@@ -141,7 +144,7 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
 
   try {
     const [users] = await db.execute(
-      `SELECT id, user_name, email, password_hash, full_name, department, user_role, is_active
+      `SELECT id, user_name, email, phone, password_hash, full_name, department, user_role, is_active
        FROM user_profiles WHERE email = ? OR user_name = ?`,
       [identifier.toLowerCase(), identifier]
     );
@@ -164,6 +167,7 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
         id: user.id,
         user_name: user.user_name,
         email: user.email,
+        phone: user.phone,
         full_name: user.full_name,
         department: user.department,
         role: user.user_role

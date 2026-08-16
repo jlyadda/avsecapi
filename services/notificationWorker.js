@@ -1,6 +1,7 @@
 const db = require('../db');
 const config = require('../config');
 const { sendNotificationEmail } = require('./emailService');
+const { sendNotificationSms } = require('./smsService');
 
 let timer;
 let processing = false;
@@ -38,13 +39,15 @@ const processNotificationOutbox = async () => {
     await connection.commit();
 
     const [deliveries] = await db.execute(
-      `SELECT delivery.id, delivery.recipient_email,
-              delivery.attempt_count, notification.title, notification.body
+      `SELECT delivery.id, delivery.channel, delivery.recipient_email,
+              delivery.recipient_phone, delivery.attempt_count,
+              notification.title,
+              COALESCE(delivery.content_override, notification.body) AS body
        FROM notification_deliveries delivery
        INNER JOIN notifications notification
          ON notification.id = delivery.notification_id
        WHERE delivery.notification_id = ?
-         AND delivery.channel = 'EMAIL'
+         AND delivery.channel IN ('EMAIL', 'SMS')
          AND delivery.status = 'PENDING'
          AND delivery.available_at <= NOW(3)`,
       [outbox.notification_id]
@@ -52,21 +55,31 @@ const processNotificationOutbox = async () => {
 
     for (const delivery of deliveries) {
       try {
-        await sendNotificationEmail({
-          email: delivery.recipient_email,
-          title: delivery.title,
-          body: delivery.body
-        });
+        let providerMessageId = null;
+        if (delivery.channel === 'EMAIL') {
+          await sendNotificationEmail({
+            email: delivery.recipient_email,
+            title: delivery.title,
+            body: delivery.body
+          });
+        } else {
+          const result = await sendNotificationSms({
+            phone: delivery.recipient_phone,
+            title: delivery.title,
+            body: delivery.body
+          });
+          providerMessageId = result.messageId;
+        }
         await db.execute(
           `UPDATE notification_deliveries
            SET status = 'SENT', attempt_count = attempt_count + 1,
-               sent_at = NOW(3), last_error = NULL
+               sent_at = NOW(3), last_error = NULL, provider_message_id = ?
            WHERE id = ?`,
-          [delivery.id]
+          [providerMessageId, delivery.id]
         );
       } catch (error) {
         const attempts = delivery.attempt_count + 1;
-        const permanent = error.code === 'EAUTH' || attempts >= 5;
+        const permanent = error.permanent || error.code === 'EAUTH' || attempts >= 5;
         const delayMinutes = Math.min(2 ** attempts, 30);
         await db.execute(
           `UPDATE notification_deliveries
@@ -89,14 +102,15 @@ const processNotificationOutbox = async () => {
          SUM(status = 'PENDING') AS pending,
          SUM(status = 'FAILED') AS failed
        FROM notification_deliveries
-       WHERE notification_id = ? AND channel = 'EMAIL'`,
+         WHERE notification_id = ? AND channel IN ('EMAIL', 'SMS')`,
       [outbox.notification_id]
     );
     if (Number(remaining.pending) > 0) {
       const [[nextDelivery]] = await db.execute(
         `SELECT MIN(available_at) AS available_at
          FROM notification_deliveries
-         WHERE notification_id = ? AND channel = 'EMAIL' AND status = 'PENDING'`,
+         WHERE notification_id = ?
+           AND channel IN ('EMAIL', 'SMS') AND status = 'PENDING'`,
         [outbox.notification_id]
       );
       await db.execute(

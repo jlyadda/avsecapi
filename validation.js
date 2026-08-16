@@ -52,6 +52,7 @@ const registerSchema = z.object({
     user_name: z.string().trim().min(3).max(50).regex(/^[A-Za-z0-9._-]+$/),
     email,
     password: z.string().min(12).max(128),
+    phone: phone.optional(),
     full_name: z.string().trim().min(2).max(255).optional(),
     department: z.string().trim().min(2).max(255).optional(),
     role: z.enum(ROLES).default('security_assistant'),
@@ -512,6 +513,12 @@ const notificationIdSchema = z.object({
   body: z.object({}).strict().optional()
 });
 
+const smsDeliveryReportSchema = z.object({
+  params: z.object({
+    message_id: z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9._:-]+$/)
+  }).strict()
+});
+
 const notificationReadAllSchema = z.object({
   body: z.object({}).strict()
 });
@@ -591,21 +598,48 @@ const passAssignmentStatisticsSchema = z.object({
 const cardAssignmentSchema = z.object({
   params: z.object({ reference: applicationReference }),
   body: z.object({
-    card_number: z.string().trim().toUpperCase().min(2).max(100).regex(/^[A-Z0-9/_-]+$/)
+    card_number: z.string().trim().toUpperCase().min(2).max(100).regex(/^[A-Z0-9/_-]+$/),
+    identity_document_retained: z.literal(true)
   }).strict()
 });
 
 const cardReturnSchema = z.object({
   params: z.object({ reference: applicationReference }),
-  body: z.object({}).strict()
+  body: z.object({
+    identity_document_returned: z.literal(true),
+    return_condition: z.enum(['GOOD', 'DAMAGED']).default('GOOD')
+  }).strict()
+});
+
+const activeCardAssignmentLookupSchema = z.object({
+  query: z.object({
+    card_number: z.string().trim().toUpperCase().min(2).max(100)
+      .regex(/^[A-Z0-9/_-]+$/)
+  }).strict()
+});
+
+const activeCardAssignmentReturnSchema = z.object({
+  body: z.object({
+    card_number: z.string().trim().toUpperCase().min(2).max(100)
+      .regex(/^[A-Z0-9/_-]+$/),
+    identity_document_returned: z.literal(true),
+    return_condition: z.enum(['GOOD', 'DAMAGED']).default('GOOD')
+  }).strict()
+});
+
+const passReturnSettingsUpdateSchema = z.object({
+  body: z.object({
+    max_hold_hours: z.number().int().min(1).max(168)
+  }).strict()
 });
 
 const accountUpdateSchema = z.object({
   body: z.object({
     full_name: z.string().trim().min(2).max(255).optional(),
-    email: email.optional()
+    email: email.optional(),
+    phone: phone.nullable().optional()
   }).strict().refine(
-    (body) => body.full_name !== undefined || body.email !== undefined,
+    (body) => body.full_name !== undefined || body.email !== undefined || body.phone !== undefined,
     'At least one profile field is required.'
   )
 });
@@ -903,6 +937,51 @@ const notificationEmailCategoryUpdateSchema = z.object({
   }).strict()
 });
 
+const notificationSmsCategoryUpdateSchema = z.object({
+  params: z.object({ code: workflowCode }),
+  body: z.object({ sms_enabled: z.boolean() }).strict()
+});
+
+const notificationSmsRecipientUpdateSchema = z.object({
+  params: z.object({ recipient_type: workflowCode }),
+  body: z.object({ sms_enabled: z.boolean() }).strict()
+});
+
+const notificationSmsTemplateListSchema = z.object({
+  query: z.object({
+    category_code: workflowCode.optional(),
+    is_active: z.enum(['true', 'false', '1', '0']).transform(
+      (value) => value === 'true' || value === '1'
+    ).optional(),
+    ...paginationQuery
+  }).strict()
+});
+
+const notificationSmsTemplateCreateSchema = z.object({
+  body: z.object({
+    code: workflowCode,
+    category_code: workflowCode,
+    recipient_type: workflowCode,
+    name: z.string().trim().min(2).max(150),
+    body_template: z.string().trim().min(2).max(918),
+    is_active: z.boolean().default(true)
+  }).strict()
+});
+
+const notificationSmsTemplateUpdateSchema = z.object({
+  params: z.object({ code: workflowCode }),
+  body: z.object({
+    category_code: workflowCode.optional(),
+    recipient_type: workflowCode.optional(),
+    name: z.string().trim().min(2).max(150).optional(),
+    body_template: z.string().trim().min(2).max(918).optional(),
+    is_active: z.boolean().optional()
+  }).strict().refine(
+    (body) => Object.keys(body).length > 0,
+    'At least one SMS template field is required.'
+  )
+});
+
 const notificationTemplateListSchema = z.object({
   query: z.object({
     category_code: workflowCode.optional(),
@@ -961,13 +1040,17 @@ const approvedVisitorCardAssignmentSchema = z.object({
   params: z.object({ id: uuid }),
   body: z.object({
     card_number: z.string().trim().toUpperCase()
-      .min(2).max(100).regex(/^[A-Z0-9/_-]+$/)
+      .min(2).max(100).regex(/^[A-Z0-9/_-]+$/),
+    identity_document_retained: z.literal(true)
   }).strict()
 });
 
 const approvedVisitorCardReturnSchema = z.object({
   params: z.object({ id: uuid }),
-  body: z.object({}).strict()
+  body: z.object({
+    identity_document_returned: z.literal(true),
+    return_condition: z.enum(['GOOD', 'DAMAGED']).default('GOOD')
+  }).strict()
 });
 
 const systemSessionListSchema = z.object({
@@ -1095,6 +1178,7 @@ module.exports = {
     notificationReadAll: notificationReadAllSchema,
     notificationDeliveryList: notificationDeliveryListSchema,
     notificationSentList: notificationSentListSchema,
+    smsDeliveryReport: smsDeliveryReportSchema,
     notificationGroupCreate: notificationGroupCreateSchema,
     notificationGroupUpdate: notificationGroupUpdateSchema,
     notificationGroupMembers: notificationGroupMembersSchema,
@@ -1102,6 +1186,9 @@ module.exports = {
     passAssignmentStatistics: passAssignmentStatisticsSchema,
     cardAssignment: cardAssignmentSchema,
     cardReturn: cardReturnSchema,
+    activeCardAssignmentLookup: activeCardAssignmentLookupSchema,
+    activeCardAssignmentReturn: activeCardAssignmentReturnSchema,
+    passReturnSettingsUpdate: passReturnSettingsUpdateSchema,
     accountUpdate: accountUpdateSchema,
     passwordChange: passwordChangeSchema,
     passwordResetRequest: passwordResetRequestSchema,
@@ -1116,6 +1203,11 @@ module.exports = {
     workflowTaskList: workflowTaskListSchema,
     visitorWorkflowAction: visitorWorkflowActionSchema,
     notificationEmailCategoryUpdate: notificationEmailCategoryUpdateSchema,
+    notificationSmsCategoryUpdate: notificationSmsCategoryUpdateSchema,
+    notificationSmsRecipientUpdate: notificationSmsRecipientUpdateSchema,
+    notificationSmsTemplateList: notificationSmsTemplateListSchema,
+    notificationSmsTemplateCreate: notificationSmsTemplateCreateSchema,
+    notificationSmsTemplateUpdate: notificationSmsTemplateUpdateSchema,
     notificationTemplateList: notificationTemplateListSchema,
     notificationTemplateCreate: notificationTemplateCreateSchema,
     notificationTemplateUpdate: notificationTemplateUpdateSchema,

@@ -31,7 +31,8 @@ test('remaining internal operations are authenticated, audited and paginated', a
   const vehicleApplicationId = uuidv4();
   const visitorApplicationId = uuidv4();
   const cardId = uuidv4();
-  const assignmentId = uuidv4();
+  let assignmentId;
+  const approvedVisitorId = uuidv4();
   const createdUserName = `created.${uuidv4().slice(0, 8)}`;
   let createdUserId;
   let visitorId;
@@ -167,26 +168,67 @@ test('remaining internal operations are authenticated, audited and paginated', a
     assert.equal((await markedUsed.json()).application.status, 'USED');
 
     await db.execute(
+      `INSERT INTO visitors
+       (id, application_id, visitor_profile_id, application_number, full_name,
+        company, email, phone, approved_areas_of_access, visit_reasons,
+        areas_of_access, valid_from, valid_until, approved_at)
+       VALUES (?, ?, ?, ?, 'Vehicle Driver', 'Vehicle Operations Ltd',
+               'driver@example.test', '+256700000099', '[]',
+               '["Vehicle operations"]', '[]', ?, ?, NOW(3))`,
+      [approvedVisitorId, visitorApplicationId, visitorId,
+        `AVSEC-TEST-${visitorApplicationId.slice(0, 8)}`, clock.today, clock.today]
+    );
+    await db.execute(
       `INSERT INTO access_cards
        (id, number, access_level, category, is_assigned, is_available, is_returned)
        VALUES (?, ?, 'LEVEL_1', 'VISITOR', 0, 1, 1)`,
       [cardId, `HIST${cardId.slice(0, 8).toUpperCase()}`]
     );
     await db.execute(
-      `INSERT INTO card_assignments
-       (id, card_id, application_id, assigned_by, assigned_at, status)
-       VALUES (?, ?, ?, ?, DATE_SUB(NOW(), INTERVAL 2 HOUR), 'ACTIVE')`,
-      [assignmentId, cardId, visitorApplicationId, adminId]
+      `INSERT INTO application_approved_access_areas
+       (application_id, area_code, approved_by)
+       VALUES (?, 'PUBLIC_AREAS', ?)`,
+      [visitorApplicationId, adminId]
     );
     await db.execute(
       `INSERT INTO card_events
-       (id, card_id, event_type, performed_by, created_at)
-       VALUES (?, ?, 'CREATED', ?, DATE_SUB(NOW(), INTERVAL 3 HOUR)),
-              (?, ?, 'ASSIGNED', ?, DATE_SUB(NOW(), INTERVAL 2 HOUR))`,
-      [
-        uuidv4(), cardId, adminId,
-        uuidv4(), cardId, adminId
-      ]
+       (id, card_id, event_type, performed_by)
+       VALUES (?, ?, 'CREATED', ?)`,
+      [uuidv4(), cardId, adminId]
+    );
+
+    const cardNumber = `HIST${cardId.slice(0, 8).toUpperCase()}`;
+    const assignCard = await fetch(
+      `${baseUrl}/api/visitors/${approvedVisitorId}/card-assignment`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          card_number: cardNumber,
+          identity_document_retained: true
+        })
+      }
+    );
+    assert.equal(assignCard.status, 200);
+    const [[createdAssignment]] = await db.execute(
+      `SELECT id, retained_identity_type, retained_identity_number_last4,
+              TIMESTAMPDIFF(SECOND, assigned_at, due_at) AS allowed_seconds
+       FROM card_assignments
+       WHERE card_id = ? AND status = 'ACTIVE'`,
+      [cardId]
+    );
+    assignmentId = createdAssignment.id;
+    assert.equal(createdAssignment.retained_identity_type, 'NATIONAL_ID');
+    assert.equal(createdAssignment.retained_identity_number_last4,
+      identityNumber.slice(-4));
+    assert.equal(Number(createdAssignment.allowed_seconds), 12 * 60 * 60);
+    await db.execute(
+      `UPDATE card_assignments
+       SET assigned_at = DATE_SUB(NOW(3), INTERVAL 2 HOUR),
+           due_at = DATE_ADD(NOW(3), INTERVAL 10 HOUR),
+           identity_retained_at = DATE_SUB(NOW(3), INTERVAL 2 HOUR)
+       WHERE id = ?`,
+      [assignmentId]
     );
 
     const history = await fetch(
@@ -207,6 +249,53 @@ test('remaining internal operations are authenticated, audited and paginated', a
     assert.equal(assignedCard.status, 'ASSIGNED');
     assert.equal(assignedCard.holder_name, 'Vehicle Driver');
     assert.equal(assignedCard.holder_phone, '+256700000099');
+
+    const activeAssignment = await fetch(
+      `${baseUrl}/api/access-cards/active-assignment?card_number=${cardNumber}`,
+      { headers }
+    );
+    assert.equal(activeAssignment.status, 200);
+    const activeAssignmentBody = (await activeAssignment.json()).assignment;
+    assert.equal(activeAssignmentBody.card.number, cardNumber);
+    assert.equal(activeAssignmentBody.visitor.full_name, 'Vehicle Driver');
+    assert.equal(activeAssignmentBody.visitor.retained_identity_document.masked_number,
+      `****${identityNumber.slice(-4)}`);
+    assert.equal(activeAssignmentBody.held_duration_seconds >= 7200, true);
+    assert.equal(activeAssignmentBody.is_overdue, false);
+
+    await db.execute(
+      'UPDATE card_assignments SET due_at = DATE_SUB(NOW(3), INTERVAL 1 HOUR) WHERE id = ?',
+      [assignmentId]
+    );
+    const overdueLookup = await fetch(
+      `${baseUrl}/api/access-cards/active-assignment?card_number=${cardNumber}`,
+      { headers }
+    );
+    const overdueAssignment = (await overdueLookup.json()).assignment;
+    assert.equal(overdueAssignment.is_overdue, true);
+    assert.equal(overdueAssignment.overdue_by_seconds >= 3600, true);
+
+    const returned = await fetch(
+      `${baseUrl}/api/access-cards/active-assignment/return`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          card_number: cardNumber,
+          identity_document_returned: true,
+          return_condition: 'GOOD'
+        })
+      }
+    );
+    assert.equal(returned.status, 200);
+    const [[returnedAssignment]] = await db.execute(
+      `SELECT status, identity_released_at, identity_released_by
+       FROM card_assignments WHERE id = ?`,
+      [assignmentId]
+    );
+    assert.equal(returnedAssignment.status, 'RETURNED');
+    assert.ok(returnedAssignment.identity_released_at);
+    assert.equal(returnedAssignment.identity_released_by, adminId);
 
     const auditEvents = await fetch(
       `${baseUrl}/api/audit-events?action=VEHICLE_PERMIT_USED&resource_id=${vehicleApplicationId}`,

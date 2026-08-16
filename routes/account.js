@@ -8,7 +8,7 @@ const router = express.Router();
 
 const getAccount = async (userId) => {
   const [rows] = await db.execute(
-    `SELECT id, user_name, email, full_name, department, user_role AS role,
+    `SELECT id, user_name, email, phone, full_name, department, user_role AS role,
             is_active, last_login, created_at, updated_at
      FROM user_profiles
      WHERE id = ?`,
@@ -37,7 +37,7 @@ router.patch(
     try {
       const updates = [];
       const parameters = [];
-      for (const field of ['full_name', 'email']) {
+      for (const field of ['full_name', 'email', 'phone']) {
         if (req.body[field] !== undefined) {
           updates.push(`${field} = ?`);
           parameters.push(req.body[field]);

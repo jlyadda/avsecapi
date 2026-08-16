@@ -28,9 +28,9 @@ router.get(
       if (search) {
         const searchValue = `%${search}%`;
         conditions.push(
-          '(user_name LIKE ? OR email LIKE ? OR full_name LIKE ? OR department LIKE ?)'
+          '(user_name LIKE ? OR email LIKE ? OR phone LIKE ? OR full_name LIKE ? OR department LIKE ?)'
         );
-        parameters.push(...Array(4).fill(searchValue));
+        parameters.push(...Array(5).fill(searchValue));
       }
       if (role) {
         conditions.push('user_role = ?');
@@ -49,7 +49,7 @@ router.get(
       const total = Number(countRows[0].total);
       const offset = (page - 1) * page_size;
       const [users] = await db.execute(
-        `SELECT id, user_name, email, full_name, department, user_role AS role, is_active,
+        `SELECT id, user_name, email, phone, full_name, department, user_role AS role, is_active,
                 last_login, created_at
          FROM user_profiles
          ${whereClause}

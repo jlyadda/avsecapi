@@ -29,12 +29,15 @@ const PERMISSIONS = Object.freeze({
   VIEW_NOTIFICATION_SETTINGS: 'notification-settings:view',
   MANAGE_NOTIFICATION_TEMPLATES: 'notification-templates:manage',
   VIEW_NOTIFICATION_DELIVERIES: 'notification-deliveries:view',
+  VIEW_SMS_PROVIDER: 'sms-provider:view',
   MANAGE_API_KEYS: 'api-keys:manage',
   VIEW_ADMIN_STATS: 'admin:stats:view',
   MANAGE_USERS: 'users:manage',
   MANAGE_ROLES: 'roles:manage',
   VIEW_SYSTEM_SESSIONS: 'system-sessions:view',
-  MANAGE_SYSTEM_SESSIONS: 'system-sessions:manage'
+  MANAGE_SYSTEM_SESSIONS: 'system-sessions:manage',
+  VIEW_OPERATIONAL_SETTINGS: 'operational-settings:view',
+  MANAGE_OPERATIONAL_SETTINGS: 'operational-settings:manage'
 });
 
 const rolePermissions = Object.freeze({
@@ -99,7 +102,8 @@ const rolePermissions = Object.freeze({
     PERMISSIONS.VIEW_NOTIFICATION_DELIVERIES,
     PERMISSIONS.VIEW_ADMIN_STATS,
     PERMISSIONS.MANAGE_USERS,
-    PERMISSIONS.MANAGE_API_KEYS
+    PERMISSIONS.MANAGE_API_KEYS,
+    PERMISSIONS.VIEW_OPERATIONAL_SETTINGS
   ],
   super_admin: Object.values(PERMISSIONS)
 });

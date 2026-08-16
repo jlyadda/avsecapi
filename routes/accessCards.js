@@ -5,7 +5,7 @@ const { authenticateToken, authorizePermission } = require('../middleware');
 const { PERMISSIONS } = require('../permissions');
 const { validate, schemas } = require('../validation');
 const { findApplication } = require('./applicationHelpers');
-const { recordAudit } = require('../audit');
+const { recordAudit, sendError } = require('../audit');
 const { createSystemNotification } = require('../services/notificationService');
 const {
   assignAccessCard,
@@ -95,6 +95,158 @@ router.get(
 );
 
 router.get(
+  '/access-cards/active-assignment',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.ASSIGN_CARDS),
+  validate(schemas.activeCardAssignmentLookup),
+  async (req, res) => {
+    try {
+      const [rows] = await db.execute(
+        `SELECT assignment.id, assignment.assigned_at, assignment.due_at,
+                assignment.retained_identity_type,
+                assignment.retained_identity_number_last4,
+                card.id AS card_id, card.number AS card_number,
+                card.access_level, level.name AS access_level_name,
+                card.category, category.name AS category_name,
+                application.id AS application_id, application.application_number,
+                approved_visitor.id AS visitor_id,
+                CONCAT_WS(' ', profile.first_name, profile.other_names, profile.last_name)
+                  AS visitor_name,
+                application.company_name AS company, application.personal_phone AS phone,
+                profile.image_url,
+                TIMESTAMPDIFF(SECOND, assignment.assigned_at, NOW(3))
+                  AS held_duration_seconds,
+                TIMESTAMPDIFF(SECOND, assignment.assigned_at, assignment.due_at)
+                  AS allowed_duration_seconds,
+                NOW(3) > assignment.due_at AS is_overdue,
+                GREATEST(TIMESTAMPDIFF(SECOND, assignment.due_at, NOW(3)), 0)
+                  AS overdue_by_seconds,
+                assignment.assigned_by,
+                COALESCE(officer.full_name, officer.user_name) AS assigned_by_name
+         FROM access_cards card
+         INNER JOIN card_assignments assignment
+           ON assignment.card_id = card.id AND assignment.status = 'ACTIVE'
+         INNER JOIN visitor_applications application
+           ON application.id = assignment.application_id
+         INNER JOIN avsec_visitors profile ON profile.id = application.visitor_id
+         INNER JOIN visitors approved_visitor
+           ON approved_visitor.application_id = application.id
+         INNER JOIN card_access_levels level ON level.code = card.access_level
+         INNER JOIN card_categories category ON category.code = card.category
+         LEFT JOIN user_profiles officer ON officer.id = assignment.assigned_by
+         WHERE card.number = ?
+         LIMIT 1`,
+        [req.validatedQuery.card_number]
+      );
+      const assignment = rows[0];
+      if (!assignment) {
+        return sendError(res, 404, 'ACTIVE_CARD_ASSIGNMENT_NOT_FOUND',
+          'No active visitor assignment was found for this card number.');
+      }
+      await recordAudit(db, {
+        actorId: req.user.id,
+        action: 'ACCESS_CARD_HOLDER_LOOKUP',
+        resourceType: 'card_assignment',
+        resourceId: assignment.id,
+        requestId: req.requestId,
+        metadata: { card_id: assignment.card_id, card_number: assignment.card_number }
+      });
+      return res.json({
+        assignment: {
+          id: assignment.id,
+          card: {
+            id: assignment.card_id,
+            number: assignment.card_number,
+            access_level: assignment.access_level,
+            access_level_name: assignment.access_level_name,
+            category: assignment.category,
+            category_name: assignment.category_name
+          },
+          visitor: {
+            id: assignment.visitor_id,
+            application_id: assignment.application_id,
+            application_number: assignment.application_number,
+            full_name: assignment.visitor_name,
+            company: assignment.company,
+            phone: assignment.phone,
+            image_url: assignment.image_url,
+            retained_identity_document: {
+              type: assignment.retained_identity_type,
+              masked_number: `****${assignment.retained_identity_number_last4}`,
+              retained: true
+            }
+          },
+          assigned_at: assignment.assigned_at,
+          due_at: assignment.due_at,
+          held_duration_seconds: Number(assignment.held_duration_seconds),
+          allowed_duration_seconds: Number(assignment.allowed_duration_seconds),
+          is_overdue: Boolean(assignment.is_overdue),
+          overdue_by_seconds: Number(assignment.overdue_by_seconds),
+          assigned_by: assignment.assigned_by,
+          assigned_by_name: assignment.assigned_by_name
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(res, 500, 'ACTIVE_CARD_ASSIGNMENT_LOOKUP_FAILED',
+        'Unable to load the active card assignment.');
+    }
+  }
+);
+
+router.post(
+  '/access-cards/active-assignment/return',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.ASSIGN_CARDS),
+  validate(schemas.activeCardAssignmentReturn),
+  async (req, res) => {
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute(
+        `SELECT assignment.application_id
+         FROM access_cards card
+         INNER JOIN card_assignments assignment
+           ON assignment.card_id = card.id AND assignment.status = 'ACTIVE'
+         WHERE card.number = ? LIMIT 1 FOR UPDATE`,
+        [req.body.card_number]
+      );
+      if (!rows[0]) {
+        await connection.rollback();
+        return sendError(res, 404, 'ACTIVE_CARD_ASSIGNMENT_NOT_FOUND',
+          'No active visitor assignment was found for this card number.');
+      }
+      const application = await findApplication(connection, rows[0].application_id, true);
+      const assignment = await returnAccessCard(connection, {
+        application,
+        identityDocumentReturned: req.body.identity_document_returned,
+        returnCondition: req.body.return_condition,
+        actorId: req.user.id,
+        requestId: req.requestId
+      });
+      await connection.commit();
+      return res.json({
+        message: 'Card returned and identity-document release recorded.',
+        return: {
+          assignment_id: assignment.id,
+          card_number: req.body.card_number,
+          return_condition: req.body.return_condition,
+          identity_document_returned: true
+        }
+      });
+    } catch (error) {
+      await connection.rollback();
+      if (error.status) return sendError(res, error.status, error.code, error.message);
+      console.error(error);
+      return sendError(res, 500, 'ACTIVE_CARD_ASSIGNMENT_RETURN_FAILED',
+        'Unable to return the active card assignment.');
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+router.get(
   '/access-cards/:id/assignments',
   authenticateToken,
   authorizePermission(PERMISSIONS.VIEW_CARDS),
@@ -123,7 +275,12 @@ router.get(
                 assigned_user.user_name AS assigned_by_user_name,
                 ca.returned_at, ca.returned_by,
                 returned_user.user_name AS returned_by_user_name,
-                ca.return_condition, ca.status
+                ca.return_condition, ca.status, ca.due_at,
+                ca.retained_identity_type,
+                CONCAT('****', ca.retained_identity_number_last4)
+                  AS retained_identity_number_masked,
+                ca.identity_retained_at, ca.identity_released_at,
+                ca.identity_released_by
          FROM card_assignments ca
          INNER JOIN visitor_applications a ON a.id = ca.application_id
          LEFT JOIN user_profiles assigned_user ON assigned_user.id = ca.assigned_by
@@ -556,6 +713,7 @@ router.post(
       await assignAccessCard(connection, {
         application,
         cardNumber: req.body.card_number,
+        identityDocumentRetained: req.body.identity_document_retained,
         actorId: req.user.id,
         requestId: req.requestId
       });
@@ -599,6 +757,8 @@ router.post(
 
       await returnAccessCard(connection, {
         application,
+        identityDocumentReturned: req.body.identity_document_returned,
+        returnCondition: req.body.return_condition,
         actorId: req.user.id,
         requestId: req.requestId
       });

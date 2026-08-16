@@ -222,6 +222,7 @@ router.post(
       await assignAccessCard(connection, {
         application,
         cardNumber: req.body.card_number,
+        identityDocumentRetained: req.body.identity_document_retained,
         actorId: req.user.id,
         requestId: req.requestId
       });
@@ -277,6 +278,8 @@ router.post(
       const application = await findApplication(connection, applicationId, true);
       await returnAccessCard(connection, {
         application,
+        identityDocumentReturned: req.body.identity_document_returned,
+        returnCondition: req.body.return_condition,
         actorId: req.user.id,
         requestId: req.requestId
       });

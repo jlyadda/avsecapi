@@ -384,7 +384,10 @@ test('internal application, card, account, user list and refresh workflows', asy
           authorization: `Bearer ${assistantSession.token}`,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({ card_number: incompatibleCard.number })
+        body: JSON.stringify({
+          card_number: incompatibleCard.number,
+          identity_document_retained: true
+        })
       }
     );
     assert.equal(incompatibleAssignment.status, 409);
@@ -400,7 +403,10 @@ test('internal application, card, account, user list and refresh workflows', asy
           authorization: `Bearer ${assistantSession.token}`,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({ card_number: incompatibleCategoryCard.number.toLowerCase() })
+        body: JSON.stringify({
+          card_number: incompatibleCategoryCard.number.toLowerCase(),
+          identity_document_retained: true
+        })
       }
     );
     assert.equal(incompatibleCategoryAssignment.status, 409);
@@ -417,11 +423,28 @@ test('internal application, card, account, user list and refresh workflows', asy
           authorization: `Bearer ${assistantSession.token}`,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({ card_number: card.number })
+        body: JSON.stringify({
+          card_number: card.number,
+          identity_document_retained: true
+        })
       }
     );
     assert.equal(assigned.status, 200);
     assert.equal((await assigned.json()).visitor.card_status, 'ASSIGNED');
+
+    const activeAssignment = await fetch(
+      `${baseUrl}/access-cards/active-assignment?card_number=${encodeURIComponent(card.number)}`,
+      { headers: { authorization: `Bearer ${assistantSession.token}` } }
+    );
+    assert.equal(activeAssignment.status, 200);
+    const activeAssignmentBody = (await activeAssignment.json()).assignment;
+    assert.equal(activeAssignmentBody.card.number, card.number);
+    assert.equal(activeAssignmentBody.visitor.application_id, applicationId);
+    assert.match(activeAssignmentBody.visitor.retained_identity_document.masked_number,
+      /^\*{4}.{4}$/);
+    assert.equal(activeAssignmentBody.visitor.retained_identity_document.retained, true);
+    assert.equal(activeAssignmentBody.allowed_duration_seconds, 12 * 60 * 60);
+    assert.equal(activeAssignmentBody.held_duration_seconds >= 0, true);
 
     const checkedIn = await fetch(
       `${baseUrl}/visitor-applications/${applicationId}/check-in`,
@@ -450,17 +473,22 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal(blockedCheckout.status, 409);
 
     const returned = await fetch(
-      `${baseUrl}/visitors/${approvedVisitor.id}/card-return`,
+      `${baseUrl}/access-cards/active-assignment/return`,
       {
         method: 'POST',
         headers: {
           authorization: `Bearer ${assistantSession.token}`,
           'content-type': 'application/json'
         },
-        body: '{}'
+        body: JSON.stringify({
+          card_number: card.number,
+          identity_document_returned: true,
+          return_condition: 'GOOD'
+        })
       }
     );
     assert.equal(returned.status, 200);
+    assert.equal((await returned.json()).return.identity_document_returned, true);
 
     const assignmentStatistics = await fetch(
       `${baseUrl}/statistics/pass-assignments?from=${today}&to=${today}&interval=day`,

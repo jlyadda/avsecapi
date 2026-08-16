@@ -350,8 +350,9 @@ router.get(
       const total = Number(countRow.total);
       const [deliveries] = await db.execute(
         `SELECT delivery.id, delivery.user_id, user.user_name,
-                delivery.recipient_email, delivery.channel, delivery.status,
-                delivery.attempt_count, delivery.sent_at, delivery.created_at
+                delivery.recipient_email, delivery.recipient_phone,
+                delivery.channel, delivery.status, delivery.attempt_count,
+                delivery.provider_message_id, delivery.sent_at, delivery.created_at
          FROM notification_deliveries delivery
          LEFT JOIN user_profiles user ON user.id = delivery.user_id
          WHERE delivery.notification_id = ?

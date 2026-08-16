@@ -18,6 +18,7 @@ const createNotification = async (
     resourceType = null,
     resourceId = null,
     channels = ['IN_APP'],
+    channelBodies = {},
     targets,
     metadata = {},
     scheduledAt = null,
@@ -51,6 +52,7 @@ const createNotification = async (
 
   const recipients = new Map();
   const externalEmails = new Set();
+  const externalPhones = new Set();
   for (const target of targets) {
     await executor.execute(
       `INSERT INTO notification_targets
@@ -67,7 +69,7 @@ const createNotification = async (
       await addUsers(
         executor,
         recipients,
-        `SELECT id, email FROM user_profiles
+        `SELECT id, email, phone FROM user_profiles
          WHERE is_active = 1${roleExclusion}`,
         exclusions
       );
@@ -75,7 +77,7 @@ const createNotification = async (
       await addUsers(
         executor,
         recipients,
-        `SELECT id, email FROM user_profiles
+        `SELECT id, email, phone FROM user_profiles
          WHERE is_active = 1 AND user_role = ?${roleExclusion}`,
         [target.value, ...exclusions]
       );
@@ -83,7 +85,7 @@ const createNotification = async (
       await addUsers(
         executor,
         recipients,
-        `SELECT id, email FROM user_profiles
+        `SELECT id, email, phone FROM user_profiles
          WHERE is_active = 1 AND department = ?${roleExclusion}`,
         [target.value, ...exclusions]
       );
@@ -91,7 +93,7 @@ const createNotification = async (
       await addUsers(
         executor,
         recipients,
-        `SELECT user.id, user.email
+        `SELECT user.id, user.email, user.phone
          FROM notification_group_members member
          INNER JOIN notification_groups notification_group
            ON notification_group.id = member.group_id
@@ -105,15 +107,18 @@ const createNotification = async (
       await addUsers(
         executor,
         recipients,
-        `SELECT id, email FROM user_profiles
+        `SELECT id, email, phone FROM user_profiles
          WHERE id = ? AND is_active = 1${roleExclusion}`,
         [target.value, ...exclusions]
       );
     } else if (target.type === 'EXTERNAL_EMAIL') {
       externalEmails.add(target.value);
+    } else if (target.type === 'EXTERNAL_SMS') {
+      externalPhones.add(target.value);
     }
   }
 
+  let asynchronousDeliveryCount = 0;
   for (const recipient of recipients.values()) {
     await executor.execute(
       `INSERT INTO notification_recipients (notification_id, user_id)
@@ -135,6 +140,25 @@ const createNotification = async (
          VALUES (?, ?, ?, ?, 'EMAIL')`,
         [uuidv4(), notificationId, recipient.id, recipient.email]
       );
+      asynchronousDeliveryCount += 1;
+    }
+    if (channels.includes('SMS')) {
+      await executor.execute(
+        `INSERT INTO notification_deliveries
+         (id, notification_id, user_id, recipient_phone, channel, status, last_error,
+          content_override)
+         VALUES (?, ?, ?, ?, 'SMS', ?, ?, ?)`,
+        [
+          uuidv4(),
+          notificationId,
+          recipient.id,
+          recipient.phone,
+          recipient.phone ? 'PENDING' : 'SKIPPED',
+          recipient.phone ? null : 'RECIPIENT_PHONE_MISSING',
+          channelBodies.SMS || null
+        ]
+      );
+      if (recipient.phone) asynchronousDeliveryCount += 1;
     }
   }
 
@@ -146,10 +170,23 @@ const createNotification = async (
          VALUES (?, ?, ?, 'EMAIL')`,
         [uuidv4(), notificationId, email]
       );
+      asynchronousDeliveryCount += 1;
     }
   }
 
-  if (channels.includes('EMAIL') && (recipients.size > 0 || externalEmails.size > 0)) {
+  if (channels.includes('SMS')) {
+    for (const phone of externalPhones) {
+      await executor.execute(
+        `INSERT INTO notification_deliveries
+         (id, notification_id, recipient_phone, channel, content_override)
+         VALUES (?, ?, ?, 'SMS', ?)`,
+        [uuidv4(), notificationId, phone, channelBodies.SMS || null]
+      );
+      asynchronousDeliveryCount += 1;
+    }
+  }
+
+  if (asynchronousDeliveryCount > 0) {
     await executor.execute(
       `INSERT INTO notification_outbox
        (id, notification_id, available_at)
@@ -161,7 +198,8 @@ const createNotification = async (
   return {
     id: notificationId,
     recipientCount: recipients.size,
-    externalEmailCount: externalEmails.size
+    externalEmailCount: externalEmails.size,
+    externalSmsCount: externalPhones.size
   };
 };
 
@@ -181,31 +219,52 @@ const createSystemNotification = async (
     resourceId,
     targets,
     channels = ['IN_APP'],
+    recipientType = null,
     metadata = {}
   }
 ) => {
   const [rows] = await executor.execute(
     `SELECT template.code, template.title_template, template.body_template,
-            template.default_priority, category.email_enabled
+            template.default_priority, category.email_enabled, category.sms_enabled,
+            sms_template.body_template AS sms_body_template,
+            sms_template.is_active AS sms_template_active,
+            sms_recipient.sms_enabled AS recipient_sms_enabled
      FROM notification_templates template
      INNER JOIN notification_email_categories category
        ON category.code = template.category_code
+     LEFT JOIN notification_sms_templates sms_template
+       ON sms_template.code = template.code
+      AND sms_template.recipient_type <=> ?
+     LEFT JOIN notification_sms_recipient_settings sms_recipient
+       ON sms_recipient.code = sms_template.recipient_type
+      AND sms_recipient.is_active = 1
      WHERE template.code = ?
        AND template.is_active = 1
        AND category.is_active = 1`,
-    [templateCode]
+    [recipientType, templateCode]
   );
   const template = rows[0];
   if (!template) throw new Error(`Notification template ${templateCode} is unavailable.`);
   const effectiveChannels = channels.filter(
-    (channel) => channel !== 'EMAIL' || Boolean(template.email_enabled)
+    (channel) => (
+      channel !== 'EMAIL' || Boolean(template.email_enabled)
+    ) && (
+      channel !== 'SMS' || (
+        Boolean(template.sms_enabled)
+        && Boolean(template.sms_template_active)
+        && Boolean(template.recipient_sms_enabled)
+        && Boolean(template.sms_body_template)
+      )
+    )
   );
   if (effectiveChannels.length === 0) {
     return {
       id: null,
       recipientCount: 0,
       externalEmailCount: 0,
-      emailDisabled: true
+      externalSmsCount: 0,
+      emailDisabled: channels.includes('EMAIL') && !effectiveChannels.includes('EMAIL'),
+      smsDisabled: channels.includes('SMS') && !effectiveChannels.includes('SMS')
     };
   }
   return createNotification(executor, {
@@ -219,6 +278,9 @@ const createSystemNotification = async (
     resourceId,
     targets,
     channels: effectiveChannels,
+    channelBodies: template.sms_body_template
+      ? { SMS: renderTemplate(template.sms_body_template, values) }
+      : {},
     metadata
   });
 };

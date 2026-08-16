@@ -19,11 +19,14 @@ const notificationRoutes = require('./routes/notifications');
 const notificationGroupRoutes = require('./routes/notificationGroups');
 const notificationSettingsRoutes = require('./routes/notificationSettings');
 const notificationTemplateRoutes = require('./routes/notificationTemplates');
+const notificationSmsTemplateRoutes = require('./routes/notificationSmsTemplates');
 const applicationWorkflowRoutes = require('./routes/applicationWorkflows');
 const applicationWorkflowAdminRoutes = require('./routes/applicationWorkflowAdmin');
 const systemSessionRoutes = require('./routes/systemSessions');
 const accessAreaRoutes = require('./routes/accessAreas');
 const statisticsRoutes = require('./routes/statistics');
+const smsProviderRoutes = require('./routes/smsProvider');
+const operationalSettingsRoutes = require('./routes/operationalSettings');
 const { apiLimiter } = require('./rateLimits');
 
 const app = express();
@@ -65,10 +68,13 @@ app.use(
   notificationGroupRoutes,
   notificationSettingsRoutes,
   notificationTemplateRoutes,
+  notificationSmsTemplateRoutes,
   applicationWorkflowRoutes,
   applicationWorkflowAdminRoutes,
   systemSessionRoutes,
   statisticsRoutes,
+  smsProviderRoutes,
+  operationalSettingsRoutes,
   accessAreaRoutes,
   visitorRoutes,
   userRoutes

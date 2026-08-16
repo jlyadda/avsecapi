@@ -418,9 +418,11 @@ router.patch(
           resourceType: 'visitor_application',
           resourceId: application.id,
           targets: [
-            { type: 'EXTERNAL_EMAIL', value: application.personal_email }
+            { type: 'EXTERNAL_EMAIL', value: application.personal_email },
+            { type: 'EXTERNAL_SMS', value: application.personal_phone }
           ],
-          channels: ['EMAIL'],
+          channels: ['EMAIL', 'SMS'],
+          recipientType: 'VISITOR_APPLICANT',
           metadata: {
             application_number: application.application_number,
             decision: result.status

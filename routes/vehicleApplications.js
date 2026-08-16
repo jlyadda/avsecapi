@@ -18,6 +18,11 @@ const normalizeName = (value) => value.toLowerCase().trim().split(/\s+/);
 
 const vehicleApplicationSelect = `
   SELECT a.*, v.identity_type, v.identity_number, v.issuing_country,
+         (SELECT visitor.phone
+          FROM visitors visitor
+          WHERE visitor.visitor_profile_id = a.driver_visitor_id
+          ORDER BY visitor.approved_at DESC
+          LIMIT 1) AS applicant_phone,
          a.reviewed_by AS reviewed_by_id,
          COALESCE(reviewer.full_name, reviewer.user_name) AS reviewed_by,
          permit_user.user_name AS used_by_user_name
@@ -335,6 +340,25 @@ router.patch(
         requestId: req.requestId,
         metadata: { reference: application.reference }
       });
+      if (application.applicant_phone) {
+        await createSystemNotification(connection, {
+          templateCode: 'VEHICLE_APPLICATION_DECIDED',
+          values: {
+            reference: application.reference,
+            decision: req.body.decision.toLowerCase()
+          },
+          requestId: req.requestId,
+          resourceType: 'vehicle_access_application',
+          resourceId: application.id,
+          targets: [{ type: 'EXTERNAL_SMS', value: application.applicant_phone }],
+          channels: ['SMS'],
+          recipientType: 'VEHICLE_APPLICANT',
+          metadata: {
+            reference: application.reference,
+            decision: req.body.decision
+          }
+        });
+      }
       await connection.commit();
       const updated = await findVehicleApplication(db, application.id);
       return res.json({ application: updated });

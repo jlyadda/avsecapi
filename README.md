@@ -42,6 +42,11 @@ PASSWORD_RESET_OTP_TTL_MINUTES=10
 API_RATE_LIMIT_MAX=1000
 API_RATE_LIMIT_WINDOW_MINUTES=15
 NOTIFICATION_WORKER_INTERVAL_MS=10000
+YOOLA_SMS_API_KEY=your-yoola-api-key
+YOOLA_SMS_API_URL=https://yoolasms.com/api/v1/send_sms
+YOOLA_SMS_TIMEOUT_MS=10000
+SMS_DEFAULT_COUNTRY_CODE=256
+SMS_MAX_LENGTH=480
 ```
 
 The deployment also accepts the equivalent lower-camel SMTP names:
@@ -183,6 +188,7 @@ activation defaults to `true`, and department defaults to `Aviation Security`.
   "user_name": "j.lyadda",
   "email": "j.lyadda@example.com",
   "password": "A-Strong-Password-123",
+  "phone": "+256701405780",
   "full_name": "Jonathan Lyadda",
   "department": "Aviation Security",
   "role": "security_assistant",
@@ -195,6 +201,7 @@ Validation:
 - `user_name`: 3–50 characters; letters, numbers, `.`, `_`, and `-`
 - `email`: valid email, maximum 255 characters
 - `password`: 12–128 characters
+- `phone`: optional staff mobile number used for SMS notifications
 - `full_name`: optional, 2–255 characters
 - `department`: optional, 2–255 characters
 - `role`: optional role enum; defaults to `security_assistant`
@@ -311,18 +318,21 @@ Reusing or concurrently refreshing the old token returns `403` or `409`.
 
 **Authentication:** any active staff role
 
-Returns `{ "account": {} }` containing `id`, `user_name`, `email`, `full_name`, `department`, `role`, `is_active`, `last_login`, `created_at`, and `updated_at`.
+Returns `{ "account": {} }` containing `id`, `user_name`, `email`, `phone`, `full_name`, `department`, `role`, `is_active`, `last_login`, `created_at`, and `updated_at`.
 
 ### `PATCH /api/account`
 
 **Authentication:** any active staff role
 
-Updates the signed-in user's `full_name` and/or `email`. Usernames, departments, roles, and activation state remain administrator-controlled.
+Updates the signed-in user's `full_name`, `email`, and/or SMS `phone`. Send
+`phone: null` to remove the number. Usernames, departments, roles, and
+activation state remain administrator-controlled.
 
 ```json
 {
   "full_name": "Jonathan Gift Lyadda",
-  "email": "jonathan.lyadda@example.com"
+  "email": "jonathan.lyadda@example.com",
+  "phone": "+256701405780"
 }
 ```
 
@@ -1234,7 +1244,8 @@ Returns one approved visitor using the UUID from the `visitors` table.
 
 ```json
 {
-  "card_number": "PVG001"
+  "card_number": "PVG001",
+  "identity_document_retained": true
 }
 ```
 
@@ -1244,6 +1255,9 @@ period, and have no active card. The selected card, access level, and category
 must all be active and available. The category must have
 `can_assign_to_visitors: true`, and the access level must cover every area
 approved by the PSO/SSO. Assignment is transactional and audited.
+`identity_document_retained` must be exactly `true`. The API snapshots the
+identity-document type and only its final four characters, records custody time,
+and calculates a fixed return deadline from the current pass-return setting.
 
 Relevant conflicts are:
 
@@ -1256,9 +1270,16 @@ Relevant conflicts are:
 
 **Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
 
-Request body: `{}`. This closes the active assignment, returns the card to
-available inventory, records the returning officer, and creates audit/card
-events atomically.
+```json
+{
+  "identity_document_returned": true,
+  "return_condition": "GOOD"
+}
+```
+
+This closes the active assignment, records release of the retained identity
+document and the returning officer, and creates audit/card events atomically.
+`return_condition` is `GOOD` or `DAMAGED`; a damaged card remains unavailable.
 
 The original application-based assignment and return routes remain available
 for backward compatibility.
@@ -1446,7 +1467,8 @@ Allowed values are `AVAILABLE`, `UNAVAILABLE`, `DAMAGED`, and `LOST`. An assigne
 
 Supports `page` and `page_size`; page size defaults to 50 and is capped at 100.
 Returns historical assignment and return officers, timestamps, application
-number, return condition, and assignment status.
+number, deadline, masked retained-document number, custody/release timestamps,
+return condition, and assignment status.
 
 ```json
 {
@@ -1466,7 +1488,8 @@ number, return condition, and assignment status.
 
 ```json
 {
-  "card_number": "PVG001"
+  "card_number": "PVG001",
+  "identity_document_retained": true
 }
 ```
 
@@ -1481,9 +1504,87 @@ level must cover every approved access area. Its category must also have
 
 **Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
 
-The request body must be `{}`. This closes the assignment, records the returning officer and timestamp, and makes the card available atomically. Visitor checkout returns `409` until the card is returned.
+The request body must confirm identity-document release:
+
+```json
+{
+  "identity_document_returned": true,
+  "return_condition": "GOOD"
+}
+```
+
+This closes the assignment and records both the officer and identity-document
+release atomically. A good card becomes available; a damaged card does not.
+Visitor checkout returns `409` until the card is returned.
 
 **Response — `200`:** `{ "application": {} }`
+
+### `GET /api/access-cards/active-assignment?card_number=PVG001`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
+
+Looks up the current holder from the physical card number. The lookup is
+audited and returns only operational details: visitor name, company, phone,
+photograph, application reference, card access classification, assignment and
+deadline timestamps, elapsed seconds, overdue seconds, assigning officer, and
+the retained identity-document type with a masked number.
+
+```json
+{
+  "assignment": {
+    "id": "uuid",
+    "card": { "number": "PVG001", "access_level": "LEVEL_1" },
+    "visitor": {
+      "full_name": "Jonathan Lyadda",
+      "company": "Example Limited",
+      "retained_identity_document": {
+        "type": "NATIONAL_ID",
+        "masked_number": "****7890",
+        "retained": true
+      }
+    },
+    "assigned_at": "2026-08-16T08:00:00.000Z",
+    "due_at": "2026-08-16T20:00:00.000Z",
+    "held_duration_seconds": 3600,
+    "allowed_duration_seconds": 43200,
+    "is_overdue": false,
+    "overdue_by_seconds": 0
+  }
+}
+```
+
+### `POST /api/access-cards/active-assignment/return`
+
+**Allowed roles:** `security_assistant`, `supervisor`, `admin`, `super_admin`
+
+```json
+{
+  "card_number": "PVG001",
+  "identity_document_returned": true,
+  "return_condition": "GOOD"
+}
+```
+
+The active assignment, card inventory state, document release, card events, and
+audit event update in one transaction. Missing confirmation is rejected.
+
+### Pass-Return Settings
+
+```http
+GET /api/operational-settings/pass-return
+PATCH /api/operational-settings/pass-return
+Authorization: Bearer <jwt-token>
+```
+
+`admin` and `super_admin` may read the setting; only `super_admin` may update it.
+The default is 12 hours. Valid values are 1–168:
+
+```json
+{ "max_hold_hours": 12 }
+```
+
+Changing the setting affects new assignments only. Every assignment snapshots
+its own `due_at`, preserving the rule that applied when the pass was issued.
 
 ## Audit Events
 
@@ -1754,7 +1855,7 @@ using the configured airport offset, `AIRPORT_UTC_OFFSET`, which defaults to
 
 ## Notifications
 
-Notifications support `IN_APP` and `EMAIL` channels and snapshot recipients at
+Administrator broadcasts support `IN_APP` and `EMAIL` channels and snapshot recipients at
 creation time. Sources are `USER` for administrator broadcasts and `SYSTEM` for
 domain-triggered messages.
 
@@ -1816,7 +1917,8 @@ Archives one notification for the authenticated user.
 
 **Allowed roles:** `admin`, `super_admin`
 
-Returns paginated channel status, recipient, attempt count, and sent timestamp.
+Returns paginated channel status, recipient email/phone, provider message ID,
+attempt count, and sent timestamp.
 Provider error details are intentionally not returned.
 
 ### `GET /api/notifications/sent`
@@ -1886,18 +1988,102 @@ The API currently creates notifications for:
 - Cards marked damaged or lost.
 - New active system users.
 
-Application decisions and account creation may target external or user email
-addresses. Submission and card-alert events target relevant internal roles.
+Final visitor workflow decisions target the applicant's external email address
+and phone number. Vehicle application decisions target the accepted driver's
+phone number. SMS is currently reserved for applicant decisions and cannot be
+selected for administrator broadcasts or staff-account notifications.
+Submission and card-alert events target relevant internal roles.
 
 Business data, audit rows, recipient snapshots, and outbox records commit in the
 same transaction.
 
-### Email Worker
+### Email and SMS Worker
 
-Email is never sent inside the HTTP request. `notificationWorker.js` processes
+Email and SMS are never sent inside the HTTP request. `notificationWorker.js` processes
 the transactional outbox every `NOTIFICATION_WORKER_INTERVAL_MS`, records each
 delivery attempt, retries transient failures with exponential delay, and stops
-retrying permanent Gmail authentication failures.
+retrying permanent provider authentication or validation failures. SMS phone
+numbers are normalized to digits-only international format; local numbers
+beginning with `0` use `SMS_DEFAULT_COUNTRY_CODE`.
+
+The configured send endpoint is `/api/v1/send_sms`; its base path is also used
+for `balance`, `delivery_report`, and `inbox`. `YOOLA_SMS_API_URL` remains
+configurable for environment changes. No SMS is attempted when
+`YOOLA_SMS_API_KEY` is empty. Rotate an API key immediately if it is exposed in
+source code or chat.
+
+### SMS Provider Monitoring
+
+These routes are restricted to `super_admin` and every successful lookup is
+audited. Provider credentials and raw provider errors are never returned.
+
+```http
+GET /api/sms-provider/balance
+GET /api/sms-provider/delivery-reports/:message_id
+GET /api/sms-provider/inbox
+Authorization: Bearer <jwt-token>
+```
+
+Yoola's `schedule_sms` endpoint is intentionally not exposed while SMS is
+restricted to immediate application decisions. Decision delivery remains in the
+AVSEC outbox so its recipient snapshot, attempts, and audit trail are retained.
+
+### SMS Category and Recipient Settings
+
+SMS is sent only when all three controls are enabled: the notification category,
+the recipient type, and the event's SMS template. Disabling any one of them
+suppresses only the SMS channel; visitor decision email remains governed by its
+email-category setting.
+
+```http
+GET /api/notification-settings/sms-categories
+PATCH /api/notification-settings/sms-categories/:code
+GET /api/notification-settings/sms-recipients
+PATCH /api/notification-settings/sms-recipients/:recipient_type
+Authorization: Bearer <jwt-token>
+```
+
+`GET` allows `admin` and `super_admin`. `PATCH` requires `super_admin` and is
+audited. Category update body:
+
+```json
+{ "sms_enabled": false }
+```
+
+Initially enabled categories are `APPROVAL_WORKFLOWS` and
+`VEHICLE_APPLICATIONS`. Recipient types are:
+
+- `VISITOR_APPLICANT`
+- `VEHICLE_APPLICANT`
+
+### SMS Templates
+
+```http
+GET /api/notification-sms-templates?category_code=&is_active=&page=1&page_size=50
+POST /api/notification-sms-templates
+PATCH /api/notification-sms-templates/:code
+Authorization: Bearer <jwt-token>
+```
+
+`admin` and `super_admin` may list templates and create templates for an
+existing notification event code. Only `super_admin` may change seeded system
+templates. SMS bodies are limited to 918 characters and support the event's
+`{{placeholder}}` values.
+
+```json
+{
+  "code": "CUSTOM_APPLICATION_DECISION",
+  "category_code": "VISITOR_APPLICATIONS",
+  "recipient_type": "VISITOR_APPLICANT",
+  "name": "Custom applicant decision SMS",
+  "body_template": "AVSEC: Application {{reference}} is {{decision}}.",
+  "is_active": true
+}
+```
+
+Seeded templates are `VISITOR_WORKFLOW_COMPLETED` and
+`VEHICLE_APPLICATION_DECIDED`. The rendered SMS body is snapshotted into its
+delivery row, so later template changes do not alter queued messages.
 
 Run `npm run email:verify` before enabling email notifications in production.
 

@@ -11,8 +11,16 @@ const cardError = (status, code, message, details = {}) => {
 
 const assignAccessCard = async (
   executor,
-  { application, cardNumber, actorId, requestId }
+  { application, cardNumber, identityDocumentRetained, actorId, requestId }
 ) => {
+  if (identityDocumentRetained !== true) {
+    throw cardError(400, 'IDENTITY_DOCUMENT_RETENTION_REQUIRED',
+      'Confirm that the visitor identity document has been retained.');
+  }
+  if (!application.identity_type || !application.identity_number) {
+    throw cardError(409, 'VISITOR_IDENTITY_DOCUMENT_UNAVAILABLE',
+      'The visitor has no identity document available for custody recording.');
+  }
   if (!['APPROVED', 'CHECKED_IN'].includes(application.status)) {
     throw cardError(
       409,
@@ -109,10 +117,21 @@ const assignAccessCard = async (
     );
   }
 
+  const [[settings]] = await executor.execute(
+    'SELECT max_hold_hours FROM pass_return_settings WHERE id = 1 FOR UPDATE'
+  );
+  if (!settings) {
+    throw cardError(503, 'PASS_RETURN_SETTINGS_UNAVAILABLE',
+      'Pass-return settings are unavailable.');
+  }
+  const assignmentId = uuidv4();
   await executor.execute(
-    `INSERT INTO card_assignments (id, card_id, application_id, assigned_by)
-     VALUES (?, ?, ?, ?)`,
-    [uuidv4(), card.id, application.id, actorId]
+    `INSERT INTO card_assignments
+     (id, card_id, application_id, assigned_by, due_at,
+      retained_identity_type, retained_identity_number_last4, identity_retained_at)
+     VALUES (?, ?, ?, ?, DATE_ADD(NOW(3), INTERVAL ? HOUR), ?, ?, NOW(3))`,
+    [assignmentId, card.id, application.id, actorId, settings.max_hold_hours,
+      application.identity_type, String(application.identity_number).slice(-4)]
   );
   await executor.execute(
     `INSERT INTO card_events
@@ -141,15 +160,25 @@ const assignAccessCard = async (
     metadata: {
       application_id: application.id,
       application_number: application.application_number,
-      approved_areas: approvedAreas.map((area) => area.area_code)
+      approved_areas: approvedAreas.map((area) => area.area_code),
+      retained_identity_type: application.identity_type,
+      max_hold_hours: Number(settings.max_hold_hours)
     }
   });
-  return card;
+  return { ...card, assignmentId, maxHoldHours: Number(settings.max_hold_hours) };
 };
 
-const returnAccessCard = async (executor, { application, actorId, requestId }) => {
+const returnAccessCard = async (
+  executor,
+  { application, identityDocumentReturned, returnCondition = 'GOOD', actorId, requestId }
+) => {
+  if (identityDocumentReturned !== true) {
+    throw cardError(400, 'IDENTITY_DOCUMENT_RETURN_CONFIRMATION_REQUIRED',
+      'Confirm that the retained identity document was returned to the visitor.');
+  }
   const [assignmentRows] = await executor.execute(
-    `SELECT assignment.id, assignment.card_id
+    `SELECT assignment.id, assignment.card_id, assignment.due_at,
+            assignment.identity_retained_at, assignment.identity_released_at
      FROM card_assignments assignment
      WHERE assignment.application_id = ? AND assignment.status = 'ACTIVE'
      LIMIT 1 FOR UPDATE`,
@@ -163,6 +192,10 @@ const returnAccessCard = async (executor, { application, actorId, requestId }) =
       'This visitor has no active card assignment.'
     );
   }
+  if (!assignment.identity_retained_at || assignment.identity_released_at) {
+    throw cardError(409, 'IDENTITY_DOCUMENT_CUSTODY_INVALID',
+      'The retained identity document custody record is invalid.');
+  }
   await executor.execute(
     'SELECT id FROM access_cards WHERE id = ? FOR UPDATE',
     [assignment.card_id]
@@ -170,9 +203,10 @@ const returnAccessCard = async (executor, { application, actorId, requestId }) =
   await executor.execute(
     `UPDATE card_assignments
      SET status = 'RETURNED', returned_by = ?, returned_at = NOW(),
-         return_condition = 'GOOD'
+         return_condition = ?, identity_released_at = NOW(3),
+         identity_released_by = ?
      WHERE id = ?`,
-    [actorId, assignment.id]
+    [actorId, returnCondition, actorId, assignment.id]
   );
   await executor.execute(
     `INSERT INTO card_events
@@ -180,13 +214,23 @@ const returnAccessCard = async (executor, { application, actorId, requestId }) =
      VALUES (?, ?, ?, 'RETURNED', ?)`,
     [uuidv4(), assignment.card_id, application.id, actorId]
   );
+  if (returnCondition === 'DAMAGED') {
+    await executor.execute(
+      `INSERT INTO card_events
+       (id, card_id, application_id, event_type, performed_by)
+       VALUES (?, ?, ?, 'MARKED_DAMAGED', ?)`,
+      [uuidv4(), assignment.card_id, application.id, actorId]
+    );
+  }
   await executor.execute(
     `UPDATE access_cards
      SET current_application_id = NULL, holder_name = NULL, holder_phone = NULL,
-         is_assigned = 0, is_available = 1, is_returned = 1,
+         is_assigned = 0, is_available = ?, is_returned = 1,
+         is_damaged = CASE WHEN ? = 1 THEN 1 ELSE is_damaged END,
          last_return_date = NOW()
      WHERE id = ?`,
-    [assignment.card_id]
+    [returnCondition === 'GOOD' ? 1 : 0, returnCondition === 'DAMAGED' ? 1 : 0,
+      assignment.card_id]
   );
   await recordAudit(executor, {
     actorId,
@@ -196,7 +240,10 @@ const returnAccessCard = async (executor, { application, actorId, requestId }) =
     requestId,
     metadata: {
       application_id: application.id,
-      application_number: application.application_number
+      application_number: application.application_number,
+      return_condition: returnCondition,
+      identity_document_returned: true,
+      returned_overdue: new Date() > new Date(assignment.due_at)
     }
   });
   return assignment;

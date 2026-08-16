@@ -27,6 +27,11 @@ const envSchema = z.object({
   API_RATE_LIMIT_WINDOW_MINUTES: z.coerce.number().int().min(1).max(60).default(15),
   NOTIFICATION_WORKER_INTERVAL_MS: z.coerce.number().int().min(1000).max(60000)
     .default(10000),
+  YOOLA_SMS_API_KEY: z.string().trim().default(''),
+  YOOLA_SMS_API_URL: z.url().default('https://yoolasms.com/api/v1/send_sms'),
+  YOOLA_SMS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
+  SMS_DEFAULT_COUNTRY_CODE: z.string().regex(/^\d{1,4}$/).default('256'),
+  SMS_MAX_LENGTH: z.coerce.number().int().min(70).max(918).default(480),
   AIRPORT_UTC_OFFSET: z.string().regex(/^[+-](?:0\d|1[0-4]):[0-5]\d$/).default('+03:00'),
   PUBLIC_APP_API_KEYS: z.string().default('').refine(
     (value) => value === '' || value.split(',').every((key) => key.trim().length >= 32),
