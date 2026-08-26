@@ -52,7 +52,7 @@ const applicationSelect = `
            WHERE review.application_id = a.id
          ) AS document_reviews
   FROM visitor_applications a
-  INNER JOIN avsec_visitors v ON v.id = a.visitor_id
+  INNER JOIN all_visitors v ON v.id = a.visitor_id
   LEFT JOIN user_profiles reviewer ON reviewer.id = a.reviewed_by
   LEFT JOIN application_workflow_instances workflow_instance
     ON workflow_instance.application_id = a.id

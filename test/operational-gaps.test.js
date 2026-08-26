@@ -87,7 +87,7 @@ test('remaining internal operations are authenticated, audited and paginated', a
 
     const identityNumber = `GAPS${Date.now()}`;
     const [visitorResult] = await db.execute(
-      `INSERT INTO avsec_visitors
+      `INSERT INTO all_visitors
        (first_name, last_name, identity_type, identity_number, issuing_country,
         date_of_birth, gender, security_status, created_by)
        VALUES ('Vehicle', 'Driver', 'NATIONAL_ID', ?, 'UGANDA',
@@ -169,7 +169,7 @@ test('remaining internal operations are authenticated, audited and paginated', a
 
     await db.execute(
       `INSERT INTO visitors
-       (id, application_id, visitor_profile_id, application_number, full_name,
+       (id, application_id, all_visitor_id, application_number, full_name,
         company, email, phone, approved_areas_of_access, visit_reasons,
         areas_of_access, valid_from, valid_until, approved_at)
        VALUES (?, ?, ?, ?, 'Vehicle Driver', 'Vehicle Operations Ltd',
@@ -339,7 +339,7 @@ test('remaining internal operations are authenticated, audited and paginated', a
       [visitorApplicationId]
     );
     if (visitorId) {
-      await db.execute('DELETE FROM avsec_visitors WHERE id = ?', [visitorId]);
+      await db.execute('DELETE FROM all_visitors WHERE id = ?', [visitorId]);
     }
     await db.execute('DELETE FROM auth_tokens WHERE user_id = ?', [adminId]);
     if (createdUserId) {

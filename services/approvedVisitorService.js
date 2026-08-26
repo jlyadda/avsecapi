@@ -3,7 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const promoteApprovedVisitor = async (executor, applicationId, approvedBy) => {
   await executor.execute(
     `INSERT INTO visitors
-     (id, application_id, visitor_profile_id, application_number, full_name,
+     (id, application_id, all_visitor_id, application_number, full_name,
       company, email, phone, approved_areas_of_access,
       visit_reasons, areas_of_access, valid_from,
       valid_until, status, approved_by, approved_at)
@@ -23,12 +23,16 @@ const promoteApprovedVisitor = async (executor, applicationId, approvedBy) => {
             application.visit_reasons,
             COALESCE(application.areas_of_access, JSON_ARRAY()),
             application.approved_visit_starts, application.approved_visit_ends,
-            'APPROVED', ?, NOW()
+            CASE
+              WHEN application.approved_visit_starts > CURDATE() THEN 'PENDING_VALIDITY'
+              ELSE 'ELIGIBLE'
+            END, ?, NOW()
      FROM visitor_applications application
-     INNER JOIN avsec_visitors profile ON profile.id = application.visitor_id
+     INNER JOIN all_visitors profile ON profile.id = application.visitor_id
      WHERE application.id = ? AND application.status = 'APPROVED'
        AND application.approved_visit_starts IS NOT NULL
        AND application.approved_visit_ends IS NOT NULL
+       AND application.approved_visit_ends >= CURDATE()
      ON DUPLICATE KEY UPDATE
        full_name = VALUES(full_name), company = VALUES(company),
        email = VALUES(email), phone = VALUES(phone),
@@ -36,7 +40,11 @@ const promoteApprovedVisitor = async (executor, applicationId, approvedBy) => {
        visit_reasons = VALUES(visit_reasons),
        areas_of_access = VALUES(areas_of_access),
        valid_from = VALUES(valid_from), valid_until = VALUES(valid_until),
-       status = 'APPROVED', approved_by = VALUES(approved_by),
+       status = CASE
+         WHEN visitors.status IN ('CHECKED_IN', 'CHECKED_OUT') THEN visitors.status
+         ELSE VALUES(status)
+       END,
+       approved_by = VALUES(approved_by),
        approved_at = VALUES(approved_at)`,
     [uuidv4(), approvedBy, applicationId]
   );

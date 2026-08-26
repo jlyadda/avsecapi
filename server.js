@@ -6,6 +6,10 @@ const {
   startNotificationWorker,
   stopNotificationWorker
 } = require('./services/notificationWorker');
+const {
+  startVisitorLifecycleWorker,
+  stopVisitorLifecycleWorker
+} = require('./services/visitorLifecycleWorker');
 
 let server;
 
@@ -15,11 +19,13 @@ const start = async () => {
     console.log(`Server running on port ${config.PORT}`);
   });
   startNotificationWorker();
+  startVisitorLifecycleWorker();
 };
 
 const shutdown = async (signal) => {
   console.log(`${signal} received; shutting down.`);
   stopNotificationWorker();
+  stopVisitorLifecycleWorker();
   if (!server) {
     await db.end();
     return;

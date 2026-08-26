@@ -572,7 +572,7 @@ test('visitor application completes approval, check-in and check-out', async () 
       await db.execute('DELETE FROM visit_sessions WHERE application_id = ?', [applicationId]);
       await db.execute('DELETE FROM visitor_applications WHERE id = ?', [applicationId]);
     }
-    await db.execute('DELETE FROM avsec_visitors WHERE identity_number = ?', [identityNumber]);
+    await db.execute('DELETE FROM all_visitors WHERE identity_number = ?', [identityNumber]);
     if (sessionIds.length > 0) {
       await db.query('DELETE FROM auth_tokens WHERE jti IN (?)', [sessionIds]);
     }

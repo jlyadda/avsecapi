@@ -343,7 +343,7 @@ test('internal application, card, account, user list and refresh workflows', asy
     assert.equal((await facilitationApproved.json()).workflow.status, 'APPROVED');
 
     const approvedVisitorsResponse = await fetch(
-      `${baseUrl}/visitors?search=${identityNumber}&status=APPROVED`,
+      `${baseUrl}/visitors?search=${identityNumber}&status=ELIGIBLE`,
       {
         headers: { authorization: `Bearer ${assistantSession.token}` }
       }
@@ -430,7 +430,9 @@ test('internal application, card, account, user list and refresh workflows', asy
       }
     );
     assert.equal(assigned.status, 200);
-    assert.equal((await assigned.json()).visitor.card_status, 'ASSIGNED');
+    const assignedVisitor = (await assigned.json()).visitor;
+    assert.equal(assignedVisitor.card_status, 'ASSIGNED');
+    assert.equal(assignedVisitor.status, 'CHECKED_IN');
 
     const activeAssignment = await fetch(
       `${baseUrl}/access-cards/active-assignment?card_number=${encodeURIComponent(card.number)}`,
@@ -489,6 +491,13 @@ test('internal application, card, account, user list and refresh workflows', asy
     );
     assert.equal(returned.status, 200);
     assert.equal((await returned.json()).return.identity_document_returned, true);
+
+    const returnedVisitorResponse = await fetch(
+      `${baseUrl}/visitors/${approvedVisitor.id}`,
+      { headers: { authorization: `Bearer ${assistantSession.token}` } }
+    );
+    assert.equal(returnedVisitorResponse.status, 200);
+    assert.equal((await returnedVisitorResponse.json()).visitor.status, 'CHECKED_OUT');
 
     const assignmentStatistics = await fetch(
       `${baseUrl}/statistics/pass-assignments?from=${today}&to=${today}&interval=day`,
@@ -591,7 +600,7 @@ test('internal application, card, account, user list and refresh workflows', asy
     if (incompatibleCategoryId) {
       await db.execute('DELETE FROM card_categories WHERE id = ?', [incompatibleCategoryId]);
     }
-    await db.execute('DELETE FROM avsec_visitors WHERE identity_number = ?', [identityNumber]);
+    await db.execute('DELETE FROM all_visitors WHERE identity_number = ?', [identityNumber]);
     await db.execute(
       'DELETE FROM auth_tokens WHERE user_id IN (?, ?, ?, ?)',
       [adminId, managerId, supervisorId, assistantId]

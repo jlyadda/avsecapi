@@ -128,8 +128,8 @@ router.get(
            ON assignment.card_id = card.id AND assignment.status = 'ACTIVE'
          INNER JOIN visitor_applications application
            ON application.id = assignment.application_id
-         INNER JOIN avsec_visitors profile ON profile.id = application.visitor_id
-         INNER JOIN visitors approved_visitor
+         INNER JOIN all_visitors profile ON profile.id = application.visitor_id
+         LEFT JOIN visitors approved_visitor
            ON approved_visitor.application_id = application.id
          INNER JOIN card_access_levels level ON level.code = card.access_level
          INNER JOIN card_categories category ON category.code = card.category

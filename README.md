@@ -21,11 +21,16 @@ Replace this with the URL of the deployed AVSEC API. JSON requests must include:
 Content-Type: application/json
 ```
 
-Authenticated internal routes require:
+Authenticated internal routes accept either the migration-compatible Bearer header:
 
 ```http
 Authorization: Bearer <jwt-token>
 ```
+
+or tab-scoped browser authentication. Browser applications send the shared
+HttpOnly `avsec_browser` cookie with `credentials: 'include'` and identify the
+current tab using `X-AVSEC-Session`. Bearer authentication remains available
+for trusted non-browser clients and during migration.
 
 Browser clients must have their exact origin listed in the comma-separated
 `CORS_ALLOWED_ORIGINS` environment variable. It defaults to
@@ -47,7 +52,32 @@ YOOLA_SMS_API_URL=https://yoolasms.com/api/v1/send_sms
 YOOLA_SMS_TIMEOUT_MS=10000
 SMS_DEFAULT_COUNTRY_CODE=256
 SMS_MAX_LENGTH=480
+JWT_TTL_SECONDS=18000
+AUTH_COOKIE_ENABLED=true
+AUTH_LEGACY_COOKIE_ENABLED=false
+AUTH_RETURN_BEARER_TOKEN=true
+AUTH_COOKIE_NAME=avsec_session
+BROWSER_CONTEXT_COOKIE_NAME=avsec_browser
+BROWSER_CONTEXT_TTL_SECONDS=2592000
+AUTH_COOKIE_PATH=/
+AUTH_COOKIE_SECURE=auto
+AUTH_COOKIE_SAME_SITE=strict
+AUTH_COOKIE_DOMAIN=
 ```
+
+For production browser authentication, set `AUTH_COOKIE_ENABLED=true`,
+`AUTH_LEGACY_COOKIE_ENABLED=false`, `AUTH_RETURN_BEARER_TOKEN=false`, and
+`AUTH_COOKIE_SECURE=true`. Production must run exclusively over HTTPS.
+`AUTH_COOKIE_SECURE=auto` enables `Secure` when
+`NODE_ENV=production`. Keep `AUTH_COOKIE_SAME_SITE=strict` when the frontend and
+API are same-site. Cross-site deployments require `none`, HTTPS, and
+`AUTH_COOKIE_SECURE=true`. Set `AUTH_COOKIE_DOMAIN` only when deliberate cookie
+sharing across subdomains is required.
+
+Keep `AUTH_COOKIE_PATH=/` when the browser reaches the API through a rewritten
+proxy prefix such as `/avsec-api/api`. A narrower backend path such as `/api`
+will not match the browser-visible proxy path, so the browser will omit the
+session cookie and authenticated requests will return `401`.
 
 The deployment also accepts the equivalent lower-camel SMTP names:
 
@@ -70,16 +100,23 @@ npm run email:verify
 
 ## Authentication Model
 
-Staff sign in with a username or email and password. A successful login returns an HS256 JWT and creates a server-side session in `auth_tokens`.
+Staff sign in with a username or email and password. A successful login creates
+a server-side session in `auth_tokens`, associates it with an HttpOnly browser
+context, and returns a tab-scoped opaque handle. The API can temporarily return
+the corresponding JWT for Bearer clients.
 
 Every authenticated request verifies:
 
-1. The JWT signature, issuer, audience, and expiry.
+1. The cookie or Bearer JWT signature, issuer, audience, and expiry.
 2. The corresponding server-side session exists and has not been revoked.
 3. The user account is still active.
 4. The user’s current database role has the required permission.
 
-Role changes and account deactivation therefore take effect immediately. The default token lifetime is 18,000 seconds (5 hours), configurable with `JWT_TTL_SECONDS`.
+Role changes and account deactivation therefore take effect immediately. The
+default token lifetime is 18,000 seconds (5 hours), configurable with
+`JWT_TTL_SECONDS`. Cookie-authenticated `POST`, `PUT`, `PATCH`, and `DELETE`
+requests also require the session-bound value from `csrf_token` in the
+`X-CSRF-Token` header. Bearer requests do not require CSRF tokens.
 
 ### Staff Roles
 
@@ -119,7 +156,7 @@ Request bodies are strict. Unknown fields, missing required fields, invalid UUID
 
 | Status | Meaning |
 |---|---|
-| `401` | Bearer token was not provided. |
+| `401` | Neither a Bearer token nor an auth cookie was provided. |
 | `403` | Token is invalid, expired, revoked, belongs to an inactive user, or the user lacks permission. |
 | `404` | Requested user, application, or active API key does not exist. |
 | `409` | The requested operation conflicts with the resource’s current state. |
@@ -246,6 +283,9 @@ Authenticates an active staff user using either username or email.
 {
   "message": "Login successful",
   "token": "<jwt-token>",
+  "csrf_token": "<session-bound-csrf-token>",
+  "tab_session_handle": "<tab-scoped-session-handle>",
+  "authentication": "tab_cookie_or_bearer",
   "user": {
     "id": "7de251af-d19e-42b7-bc72-1640062be565",
     "user_name": "j.lyadda",
@@ -254,6 +294,13 @@ Authenticates an active staff user using either username or email.
   }
 }
 ```
+
+When browser authentication is enabled, the response sets the shared HttpOnly
+browser-context cookie and returns `tab_session_handle` plus `csrf_token`. Store
+the handle in tab-scoped `sessionStorage` and keep the CSRF token in memory. A
+handle cannot authenticate without the matching HttpOnly browser cookie. The
+response is marked `Cache-Control: no-store`; `token` is omitted when
+`AUTH_RETURN_BEARER_TOKEN=false`.
 
 Possible errors:
 
@@ -265,7 +312,8 @@ Successful logins do not count toward the failed-login limit.
 
 ### `POST /api/logout`
 
-Revokes only the JWT session used for the current request.
+Revokes only the session selected by `X-AVSEC-Session`. Other tabs and accounts
+in the same browser remain active. The shared browser cookie is not cleared.
 
 **Authentication:** any active staff role
 
@@ -297,20 +345,71 @@ Revokes every active session belonging to the current user, including the token 
 }
 ```
 
+### `POST /api/logout-browser`
+
+Revokes every tab session associated with the current browser context, across
+all accounts, and clears the shared browser cookie. Requires
+`X-AVSEC-Session` and `X-CSRF-Token`.
+
 ### `POST /api/auth/refresh`
 
 **Authentication:** any active staff role
 
-Atomically revokes the current bearer token and returns a replacement. The client must replace its stored token immediately. Refresh works only before the current JWT expires.
+Atomically revokes the selected tab session and issues replacement tab and CSRF
+handles plus an optional replacement Bearer token. The browser-context cookie
+does not change, so other tabs remain active.
 
 ```json
 {
   "token": "<new-jwt>",
+  "csrf_token": "<new-csrf-token>",
+  "tab_session_handle": "<new-tab-session-handle>",
   "expires_at": "2026-07-28T04:00:00.000Z"
 }
 ```
 
 Reusing or concurrently refreshing the old token returns `403` or `409`.
+
+### `GET /api/auth/csrf`
+
+**Authentication:** active browser tab session
+
+Returns a newly rotated CSRF token after a browser reload:
+
+```json
+{
+  "csrf_token": "<new-csrf-token>"
+}
+```
+
+Send the current `X-AVSEC-Session` header. This response is marked
+`Cache-Control: no-store`. Calling it with Bearer authentication returns `400`
+because Bearer requests do not need CSRF protection. Only hashes are stored.
+
+### Browser Cookie Migration
+
+1. Deploy the API with `AUTH_COOKIE_ENABLED=true` and keep
+   `AUTH_RETURN_BEARER_TOKEN=true` while existing Bearer clients are active.
+2. Store `tab_session_handle` in `sessionStorage`, send it as
+   `X-AVSEC-Session` on every authenticated request, and retain `csrf_token`
+   only in memory.
+3. Add `X-CSRF-Token` to authenticated `POST`, `PUT`, `PATCH`, and `DELETE`
+   requests. Fetch a fresh token from `GET /api/auth/csrf` after tab reload.
+4. Confirm login, reload, refresh, logout, and expired-session handling through
+   the production proxy.
+5. Set `AUTH_RETURN_BEARER_TOKEN=false`, remove browser storage migration code,
+   and keep Bearer support only for approved non-browser integrations.
+
+```js
+const response = await fetch(`${API_URL}/api/account`, {
+  credentials: 'include',
+  headers: { 'X-AVSEC-Session': sessionHandle }
+});
+```
+
+The HttpOnly cookie may still be visible to the device owner in browser
+developer tools. HttpOnly protects it from page JavaScript; it does not attempt
+to hide it from the browser or its owner.
 
 ## Current Account
 
@@ -1169,19 +1268,31 @@ Revocation takes effect on the target’s next request and is audited with the
 actor, target user, request ID, and optional human reason. A super administrator
 must use `/api/logout` instead of this route to revoke their current session.
 
-## Approved Visitors
+## Visitor Registers and Statuses
 
 The visitor data model now separates three concerns:
 
-- `avsec_visitors` is the reusable identity profile and security record.
+- `all_visitors` is the permanent reusable identity profile and security record.
 - `visitor_applications` stores every submitted access request and its workflow.
-- `visitors` is the operational register containing only applications that
-  completed final approval.
+- `visitors` is a temporary operational projection containing only finally
+  approved visits whose end date has not expired. It references `all_visitors`
+  through `all_visitor_id`; it is not a second identity record.
 
-Final workflow approval inserts the visitor into `visitors` in the same
-database transaction. Existing approved applications were backfilled during
-migration `018_approved_visitors.sql`. Check-in and check-out keep the approved
-visitor status synchronized.
+Final workflow approval inserts or updates the operational row in the same
+database transaction. The lifecycle worker removes expired rows every
+`VISITOR_LIFECYCLE_INTERVAL_MS` milliseconds. Historical identity,
+applications, reviews, sessions, assignments, and audit records remain intact.
+
+Operational visitor statuses are:
+
+- `PENDING_VALIDITY`: finally approved, but the approved start date is in the future.
+- `ELIGIBLE`: approved, currently within the visit period, and not holding a pass.
+- `CHECKED_IN`: currently holds an active assigned pass.
+- `CHECKED_OUT`: returned the pass while the approved visit period remains valid.
+
+Assigning a pass atomically creates a visit session and sets `CHECKED_IN`.
+Returning the pass atomically closes that session and sets `CHECKED_OUT`.
+Manual status changes are not the source of truth.
 
 ### `GET /api/visitors`
 
@@ -1198,10 +1309,11 @@ For the pass-assignment search screen, use:
 GET /api/visitors?search=Jonathan&eligible_for_card_assignment=true&page=1&page_size=20
 ```
 
-The eligibility filter is authoritative. It returns only `APPROVED` visitors
-whose PSO/SSO-approved period includes the database date, who have at least one
-active approved access area, and who do not already hold a card. The frontend
-must not reproduce these rules from its local clock.
+The eligibility filter is authoritative. It returns `ELIGIBLE` visitors and
+previously `CHECKED_OUT` visitors whose PSO/SSO-approved period still includes
+the database date, who have at least one active approved access area, and who
+do not already hold a card. This permits controlled repeat entry during a
+multi-day approval. The frontend must not reproduce these rules locally.
 
 Each visitor includes identity details, approved access-area codes and dates,
 approver display name, current card details, `within_valid_period`, and
@@ -1220,7 +1332,7 @@ approver display name, current card details, `within_valid_period`, and
       "approved_areas_of_access": ["PASSENGER_TERMINAL", "AIRSIDE"],
       "valid_from": "2026-08-02",
       "valid_until": "2026-08-05",
-      "status": "APPROVED",
+      "status": "ELIGIBLE",
       "card_number": null,
       "pass_assignment_eligible": 1
     }
@@ -1250,8 +1362,9 @@ Returns one approved visitor using the UUID from the `visitors` table.
 ```
 
 Card numbers are trimmed, converted to uppercase, and validated before lookup.
-The visitor must be `APPROVED` or `CHECKED_IN`, within the approved access
-period, and have no active card. The selected card, access level, and category
+The visitor must be `ELIGIBLE` or previously `CHECKED_OUT`, remain within the
+approved access period, and have no active card. The selected
+card, access level, and category
 must all be active and available. The category must have
 `can_assign_to_visitors: true`, and the access level must cover every area
 approved by the PSO/SSO. Assignment is transactional and audited.
@@ -1280,6 +1393,49 @@ Relevant conflicts are:
 This closes the active assignment, records release of the retained identity
 document and the returning officer, and creates audit/card events atomically.
 `return_condition` is `GOOD` or `DAMAGED`; a damaged card remains unavailable.
+Expired rows are absent from `visitors`, but an outstanding pass can still be
+found and returned by card number through the active-assignment return route.
+
+### Remaining Considerations
+
+- Removing an expired operational row does not revoke an unreturned pass; the
+  pass remains assigned and visible for recovery, escalation, and audit.
+- Identity matching still depends on normalized identity type, country, and
+  number. A dedicated uniqueness policy is required for passports that may be reissued.
+
+### `GET /api/all-visitors`
+
+**Allowed roles:** `audit`, `admin`, `super_admin`
+
+Lists the permanent master visitor register with bounded pagination. Supported
+filters are `search`, `security_status`, `page`, and `page_size`. Searches may
+match the full identity number server-side, but responses expose only
+`identity_number_masked` in the form `****1234`. Dates of birth, document links,
+images, phone numbers, email addresses, and full identity numbers are excluded.
+Every list operation is audited without recording the search value.
+
+```http
+GET /api/all-visitors?search=Jonathan&security_status=ACTIVE&page=1&page_size=50
+Authorization: Bearer <jwt>
+```
+
+`GET /api/all-visitors/:id` returns one masked master record and creates a
+separate detail-view audit event.
+
+### Snapshot Synchronization Rules
+
+- `all_visitors` is authoritative for identity and name fields.
+- `visitor_applications` is authoritative for application-time company,
+  contact, visit-reason, requested-area, and approved-date fields.
+- `application_approved_access_areas` is authoritative for granted access areas.
+- Active `card_assignments` are authoritative for `CHECKED_IN`; a completed
+  return is authoritative for `CHECKED_OUT`.
+- The singleton lifecycle worker refreshes operational `visitors` snapshots,
+  activates future visits, and removes expired rows.
+
+The worker uses the MySQL advisory lock `avsec:visitor-lifecycle` with a
+zero-second wait. In a multi-instance deployment only the instance holding that
+connection-scoped lock performs a synchronization cycle.
 
 The original application-based assignment and return routes remain available
 for backward compatibility.
@@ -2101,7 +2257,18 @@ The API uses standard rate-limit response headers. In a multi-instance deploymen
 
 ## Internal Client Guidance
 
-- Store JWTs in secure application storage and never log them.
+- Browser clients should use `credentials: 'include'`, store the opaque tab
+  handle in `sessionStorage`, and send `X-AVSEC-Session` on every authenticated
+  request. Keep CSRF tokens only in memory and send them on mutations.
+- After a tab reload, use its stored handle to call `GET /api/auth/csrf` before
+  enabling mutation controls. Replace both handles after every refresh.
+- Do not store browser JWTs in localStorage or sessionStorage. Trusted
+  non-browser clients may use Bearer tokens from secure process-level storage.
+- Never log cookies, JWTs, CSRF tokens, password data, reset codes, or API-key
+  secrets. Ensure reverse proxies forward `Cookie` and `Set-Cookie` unchanged.
+- Configure exact HTTPS origins in `CORS_ALLOWED_ORIGINS`; never use `*` with
+  credentialed requests. Keep CSP and output encoding protections because
+  HttpOnly prevents token reads but cannot stop XSS from issuing requests.
 - Clear local authentication state after `401` or token/session-related `403` responses.
 - Do not cache identity numbers, document links, or application responses longer than operationally necessary.
 - Treat API key secrets as credentials. The key-creation response is the only time the secret is available.

@@ -20,14 +20,14 @@ const vehicleApplicationSelect = `
   SELECT a.*, v.identity_type, v.identity_number, v.issuing_country,
          (SELECT visitor.phone
           FROM visitors visitor
-          WHERE visitor.visitor_profile_id = a.driver_visitor_id
+          WHERE visitor.all_visitor_id = a.driver_visitor_id
           ORDER BY visitor.approved_at DESC
           LIMIT 1) AS applicant_phone,
          a.reviewed_by AS reviewed_by_id,
          COALESCE(reviewer.full_name, reviewer.user_name) AS reviewed_by,
          permit_user.user_name AS used_by_user_name
   FROM vehicle_access_applications a
-  INNER JOIN avsec_visitors v ON v.id = a.driver_visitor_id
+  INNER JOIN all_visitors v ON v.id = a.driver_visitor_id
   LEFT JOIN user_profiles reviewer ON reviewer.id = a.reviewed_by
   LEFT JOIN user_profiles permit_user ON permit_user.id = a.used_by`;
 
@@ -79,13 +79,14 @@ router.post(
 
       const [drivers] = await connection.execute(
         `SELECT v.id, v.first_name, v.last_name, v.other_names
-         FROM avsec_visitors v
+         FROM all_visitors v
          INNER JOIN visitor_applications a ON a.visitor_id = v.id
+         INNER JOIN visitors active_visitor ON active_visitor.application_id = a.id
          WHERE v.identity_type = 'NATIONAL_ID'
            AND v.issuing_country = 'UGANDA'
            AND v.identity_number = ?
            AND v.security_status = 'ACTIVE'
-           AND a.status IN ('APPROVED', 'CHECKED_IN')
+           AND active_visitor.status IN ('ELIGIBLE', 'CHECKED_IN', 'CHECKED_OUT')
            AND ? >= TIMESTAMP(COALESCE(a.approved_visit_starts, a.visit_starts), '00:00:00')
            AND ? <= DATE_ADD(
              TIMESTAMP(COALESCE(a.approved_visit_ends, a.visit_ends), '00:00:00'),
@@ -237,7 +238,7 @@ router.get(
       const [[countRow]] = await db.execute(
         `SELECT COUNT(*) AS total
          FROM vehicle_access_applications a
-         INNER JOIN avsec_visitors v ON v.id = a.driver_visitor_id
+         INNER JOIN all_visitors v ON v.id = a.driver_visitor_id
          ${whereClause}`,
         parameters
       );

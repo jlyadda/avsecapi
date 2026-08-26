@@ -21,7 +21,7 @@ const assignAccessCard = async (
     throw cardError(409, 'VISITOR_IDENTITY_DOCUMENT_UNAVAILABLE',
       'The visitor has no identity document available for custody recording.');
   }
-  if (!['APPROVED', 'CHECKED_IN'].includes(application.status)) {
+  if (!['APPROVED', 'CHECKED_OUT'].includes(application.status)) {
     throw cardError(
       409,
       'APPLICATION_NOT_PASS_ELIGIBLE',
@@ -151,6 +151,20 @@ const assignAccessCard = async (
       card.id
     ]
   );
+  await executor.execute(
+    `INSERT INTO visit_sessions
+     (application_id, visitor_id, checked_in_by, status)
+     VALUES (?, ?, ?, 'CHECKED_IN')`,
+    [application.id, application.visitor_id, actorId]
+  );
+  await executor.execute(
+    "UPDATE visitor_applications SET status = 'CHECKED_IN' WHERE id = ?",
+    [application.id]
+  );
+  await executor.execute(
+    "UPDATE visitors SET status = 'CHECKED_IN' WHERE application_id = ?",
+    [application.id]
+  );
   await recordAudit(executor, {
     actorId,
     action: 'ACCESS_CARD_ASSIGNED',
@@ -164,6 +178,14 @@ const assignAccessCard = async (
       retained_identity_type: application.identity_type,
       max_hold_hours: Number(settings.max_hold_hours)
     }
+  });
+  await recordAudit(executor, {
+    actorId,
+    action: 'VISITOR_CHECKED_IN',
+    resourceType: 'visitor_application',
+    resourceId: application.id,
+    requestId,
+    metadata: { card_id: card.id, card_number: card.number }
   });
   return { ...card, assignmentId, maxHoldHours: Number(settings.max_hold_hours) };
 };
@@ -232,6 +254,28 @@ const returnAccessCard = async (
     [returnCondition === 'GOOD' ? 1 : 0, returnCondition === 'DAMAGED' ? 1 : 0,
       assignment.card_id]
   );
+  await executor.execute(
+    `UPDATE visit_sessions
+     SET checked_out_at = NOW(3), checked_out_by = ?, status = 'CHECKED_OUT'
+     WHERE application_id = ? AND status = 'CHECKED_IN'`,
+    [actorId, application.id]
+  );
+  await executor.execute(
+    "UPDATE visitor_applications SET status = 'CHECKED_OUT' WHERE id = ?",
+    [application.id]
+  );
+  await executor.execute(
+    "UPDATE visitors SET status = 'CHECKED_OUT' WHERE application_id = ?",
+    [application.id]
+  );
+  await executor.execute(
+    'UPDATE all_visitors SET last_visit = CURDATE() WHERE id = ?',
+    [application.visitor_id]
+  );
+  await executor.execute(
+    'DELETE FROM visitors WHERE application_id = ? AND valid_until < CURDATE()',
+    [application.id]
+  );
   await recordAudit(executor, {
     actorId,
     action: 'ACCESS_CARD_RETURNED',
@@ -244,6 +288,17 @@ const returnAccessCard = async (
       return_condition: returnCondition,
       identity_document_returned: true,
       returned_overdue: new Date() > new Date(assignment.due_at)
+    }
+  });
+  await recordAudit(executor, {
+    actorId,
+    action: 'VISITOR_CHECKED_OUT',
+    resourceType: 'visitor_application',
+    resourceId: application.id,
+    requestId,
+    metadata: {
+      card_id: assignment.card_id,
+      return_condition: returnCondition
     }
   });
   return assignment;

@@ -3,6 +3,11 @@ const { z } = require('zod');
 
 dotenv.config({ quiet: true });
 
+const booleanEnvironmentValue = (defaultValue) => z
+  .enum(['true', 'false'])
+  .default(defaultValue)
+  .transform((value) => value === 'true');
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(5000),
@@ -13,6 +18,22 @@ const envSchema = z.object({
   DB_NAME: z.string().min(1),
   JWT_SECRET: z.string().min(32),
   JWT_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(18000),
+  AUTH_COOKIE_ENABLED: booleanEnvironmentValue('true'),
+  AUTH_LEGACY_COOKIE_ENABLED: booleanEnvironmentValue('false'),
+  AUTH_RETURN_BEARER_TOKEN: booleanEnvironmentValue('true'),
+  AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).default('avsec_session'),
+  BROWSER_CONTEXT_COOKIE_NAME: z.string()
+    .regex(/^[A-Za-z0-9_-]{1,64}$/)
+    .default('avsec_browser'),
+  BROWSER_CONTEXT_TTL_SECONDS: z.coerce.number()
+    .int()
+    .min(86400)
+    .max(31536000)
+    .default(2592000),
+  AUTH_COOKIE_PATH: z.string().regex(/^\/(?:[^;,\s]*)?$/).default('/'),
+  AUTH_COOKIE_SECURE: z.enum(['auto', 'true', 'false']).default('auto'),
+  AUTH_COOKIE_SAME_SITE: z.enum(['strict', 'lax', 'none']).default('strict'),
+  AUTH_COOKIE_DOMAIN: z.string().trim().default(''),
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
   CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
   GMAIL_USER: z.string().trim().default(''),
@@ -27,6 +48,8 @@ const envSchema = z.object({
   API_RATE_LIMIT_WINDOW_MINUTES: z.coerce.number().int().min(1).max(60).default(15),
   NOTIFICATION_WORKER_INTERVAL_MS: z.coerce.number().int().min(1000).max(60000)
     .default(10000),
+  VISITOR_LIFECYCLE_INTERVAL_MS: z.coerce.number().int().min(60000).max(3600000)
+    .default(300000),
   YOOLA_SMS_API_KEY: z.string().trim().default(''),
   YOOLA_SMS_API_URL: z.url().default('https://yoolasms.com/api/v1/send_sms'),
   YOOLA_SMS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
@@ -46,8 +69,17 @@ if (!result.success) {
   throw new Error(`Invalid environment configuration: ${fields}`);
 }
 
+const authCookieSecure = result.data.AUTH_COOKIE_SECURE === 'auto'
+  ? result.data.NODE_ENV === 'production'
+  : result.data.AUTH_COOKIE_SECURE === 'true';
+
+if (result.data.AUTH_COOKIE_SAME_SITE === 'none' && !authCookieSecure) {
+  throw new Error('Invalid environment configuration: SameSite=None requires a secure auth cookie.');
+}
+
 module.exports = {
   ...result.data,
+  AUTH_COOKIE_SECURE: authCookieSecure,
   GMAIL_USER: result.data.GMAIL_USER || result.data.gmailUser,
   GMAIL_APP_PASSWORD: (
     result.data.GMAIL_APP_PASSWORD || result.data.gmailAppSpecificPassword

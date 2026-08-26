@@ -71,7 +71,7 @@ router.get(
           AND stage_instance.stage_id = instance.current_stage_id
          INNER JOIN application_workflow_stages stage ON stage.id = stage_instance.stage_id
          INNER JOIN visitor_applications application ON application.id = instance.application_id
-         INNER JOIN avsec_visitors visitor ON visitor.id = application.visitor_id
+         INNER JOIN all_visitors visitor ON visitor.id = application.visitor_id
          WHERE instance.status = 'ACTIVE' AND stage_instance.status = 'ACTIVE'
            AND ${eligibility}${searchCondition}`,
         [...baseParameters, ...searchParameters]
@@ -98,7 +98,7 @@ router.get(
           AND stage_instance.stage_id = instance.current_stage_id
          INNER JOIN application_workflow_stages stage ON stage.id = stage_instance.stage_id
          INNER JOIN visitor_applications application ON application.id = instance.application_id
-         INNER JOIN avsec_visitors visitor ON visitor.id = application.visitor_id
+         INNER JOIN all_visitors visitor ON visitor.id = application.visitor_id
          WHERE instance.status = 'ACTIVE' AND stage_instance.status = 'ACTIVE'
            AND ${eligibility}${searchCondition}
          ORDER BY stage_instance.activated_at

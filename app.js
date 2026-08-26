@@ -1,8 +1,10 @@
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const config = require('./config');
 const authRoutes = require('./routes/auth');
 const visitorRoutes = require('./routes/visitors');
+const allVisitorRoutes = require('./routes/allVisitors');
 const userRoutes = require('./routes/users');
 const applicationRoutes = require('./routes/applications');
 const apiKeyRoutes = require('./routes/apiKeys');
@@ -42,12 +44,20 @@ app.use(cors({
     return callback(null, allowedOrigins.has(origin.replace(/\/$/, '')));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type', 'X-API-Key', 'X-Request-Id'],
+  allowedHeaders: [
+    'Authorization',
+    'Content-Type',
+    'X-API-Key',
+    'X-Request-Id',
+    'X-AVSEC-Session',
+    'X-CSRF-Token'
+  ],
   exposedHeaders: ['X-Request-Id'],
   credentials: true,
   maxAge: 600,
   optionsSuccessStatus: 204
 }));
+app.use(cookieParser());
 app.use(express.json({ limit: '100kb' }));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.use(readinessRoutes);
@@ -76,6 +86,7 @@ app.use(
   smsProviderRoutes,
   operationalSettingsRoutes,
   accessAreaRoutes,
+  allVisitorRoutes,
   visitorRoutes,
   userRoutes
 );

@@ -45,7 +45,7 @@ const snapshotSelect = `
    )
   LEFT JOIN visitor_applications application
     ON application.id = assignment.application_id
-  LEFT JOIN avsec_visitors visitor
+  LEFT JOIN all_visitors visitor
     ON visitor.id = application.visitor_id
   WHERE c.created_at < DATE_ADD(?, INTERVAL 1 DAY)`;
 

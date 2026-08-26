@@ -99,10 +99,10 @@ router.patch(
         const [[usage]] = await connection.execute(
           `SELECT COUNT(*) AS total
            FROM application_approved_access_areas approved
-           INNER JOIN visitor_applications application
-             ON application.id = approved.application_id
+           INNER JOIN visitors visitor
+             ON visitor.application_id = approved.application_id
            WHERE approved.area_code = ?
-             AND application.status IN ('APPROVED','CHECKED_IN')`,
+             AND visitor.status IN ('PENDING_VALIDITY','ELIGIBLE','CHECKED_IN','CHECKED_OUT')`,
           [req.params.code]
         );
         if (Number(usage.total) > 0) {

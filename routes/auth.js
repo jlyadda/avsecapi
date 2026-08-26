@@ -4,17 +4,38 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const config = require('../config');
-const { authenticateToken, authorizePermission } = require('../middleware');
+const {
+  authenticateToken,
+  authorizePermission,
+  enforceTrustedBrowserOrigin
+} = require('../middleware');
 const { validate, schemas } = require('../validation');
 const { loginLimiter } = require('../rateLimits');
 const { PERMISSIONS, canManageRole } = require('../permissions');
 const { recordAudit, sendError } = require('../audit');
 const { createSystemNotification } = require('../services/notificationService');
+const {
+  clearAuthCookie,
+  clearBrowserContextCookie,
+  createCsrfToken,
+  hashCsrfToken,
+  setAuthCookie,
+  setBrowserContextCookie
+} = require('../services/authCookieService');
+const { getOrCreateBrowserContext } = require('../services/browserContextService');
 
 const router = express.Router();
 
-const issueToken = async (executor, userId, req, parentJti = null) => {
+const issueToken = async (
+  executor,
+  userId,
+  req,
+  parentJti = null,
+  browserContextId = null
+) => {
   const jti = uuidv4();
+  const csrfToken = createCsrfToken();
+  const sessionHandle = browserContextId ? createCsrfToken() : null;
   const expiresAt = new Date(Date.now() + config.JWT_TTL_SECONDS * 1000);
   const token = jwt.sign(
     { id: userId },
@@ -29,8 +50,9 @@ const issueToken = async (executor, userId, req, parentJti = null) => {
   );
   await executor.execute(
     `INSERT INTO auth_tokens
-     (jti, user_id, expires_at, ip_address, last_ip_address, user_agent, parent_jti)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     (jti, user_id, expires_at, ip_address, last_ip_address, user_agent, parent_jti,
+      csrf_token_hash, browser_context_id, session_handle_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       jti,
       userId,
@@ -38,11 +60,20 @@ const issueToken = async (executor, userId, req, parentJti = null) => {
       req.ip?.replace(/^::ffff:/, '').slice(0, 45) || null,
       req.ip?.replace(/^::ffff:/, '').slice(0, 45) || null,
       req.get('user-agent')?.slice(0, 500) || null,
-      parentJti
+      parentJti,
+      hashCsrfToken(csrfToken),
+      browserContextId,
+      sessionHandle ? hashCsrfToken(sessionHandle) : null
     ]
   );
-  return { token, jti, expiresAt };
+  return { token, jti, expiresAt, csrfToken, sessionHandle };
 };
+
+const setPrivateAuthResponse = (res) => res.set('Cache-Control', 'no-store');
+
+const bearerTokenResponse = (token) => (
+  config.AUTH_RETURN_BEARER_TOKEN ? { token } : {}
+);
 
 router.post(
   '/register',
@@ -139,7 +170,12 @@ router.post(
   }
 );
 
-router.post('/login', loginLimiter, validate(schemas.login), async (req, res) => {
+router.post(
+  '/login',
+  enforceTrustedBrowserOrigin,
+  loginLimiter,
+  validate(schemas.login),
+  async (req, res) => {
   const { identifier, password } = req.body;
 
   try {
@@ -157,12 +193,50 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
       return res.status(403).json({ error: 'This account is awaiting approval or has been deactivated.' });
     }
 
-    const { token, expiresAt } = await issueToken(db, user.id, req);
-    await db.execute('UPDATE user_profiles SET last_login = NOW() WHERE id = ?', [user.id]);
+    const connection = await db.getConnection();
+    let browserContext = null;
+    let issuedSession;
+    try {
+      await connection.beginTransaction();
+      if (config.AUTH_COOKIE_ENABLED) {
+        browserContext = await getOrCreateBrowserContext(connection, req);
+      }
+      issuedSession = await issueToken(
+        connection,
+        user.id,
+        req,
+        null,
+        browserContext?.id || null
+      );
+      await connection.execute(
+        'UPDATE user_profiles SET last_login = NOW() WHERE id = ?',
+        [user.id]
+      );
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    const { token, expiresAt, csrfToken, sessionHandle } = issuedSession;
+    if (browserContext) {
+      setBrowserContextCookie(
+        res,
+        browserContext.secret,
+        browserContext.expiresAt
+      );
+    }
+    if (config.AUTH_LEGACY_COOKIE_ENABLED) setAuthCookie(res, token, expiresAt);
+    else clearAuthCookie(res);
+    setPrivateAuthResponse(res);
 
     return res.json({
       message: 'Login successful',
-      token,
+      ...bearerTokenResponse(token),
+      ...(config.AUTH_COOKIE_ENABLED ? { csrf_token: csrfToken } : {}),
+      ...(sessionHandle ? { tab_session_handle: sessionHandle } : {}),
+      authentication: config.AUTH_COOKIE_ENABLED ? 'tab_cookie_or_bearer' : 'bearer',
       user: {
         id: user.id,
         user_name: user.user_name,
@@ -178,7 +252,8 @@ router.post('/login', loginLimiter, validate(schemas.login), async (req, res) =>
     console.error(error);
     return res.status(500).json({ error: 'Database error during login.' });
   }
-});
+  }
+);
 
 router.post('/auth/refresh', authenticateToken, async (req, res) => {
   const connection = await db.getConnection();
@@ -194,14 +269,23 @@ router.post('/auth/refresh', authenticateToken, async (req, res) => {
       await connection.rollback();
       return res.status(409).json({ error: 'Session has already been refreshed or revoked.' });
     }
-    const { token, expiresAt } = await issueToken(
+    const { token, expiresAt, csrfToken, sessionHandle } = await issueToken(
       connection,
       req.user.id,
       req,
-      req.user.jti
+      req.user.jti,
+      req.authTransport === 'tab' ? req.browserContextId : null
     );
     await connection.commit();
-    return res.json({ token, expires_at: expiresAt });
+    if (config.AUTH_LEGACY_COOKIE_ENABLED) setAuthCookie(res, token, expiresAt);
+    else clearAuthCookie(res);
+    setPrivateAuthResponse(res);
+    return res.json({
+      ...bearerTokenResponse(token),
+      ...(req.authTransport !== 'bearer' ? { csrf_token: csrfToken } : {}),
+      ...(sessionHandle ? { tab_session_handle: sessionHandle } : {}),
+      expires_at: expiresAt
+    });
   } catch (error) {
     await connection.rollback();
     console.error(error);
@@ -219,6 +303,7 @@ router.post('/logout', authenticateToken, async (req, res) => {
        WHERE jti = ? AND revoked_at IS NULL`,
       [req.user.id, req.user.jti]
     );
+    clearAuthCookie(res);
     return res.json({ message: 'Logout successful.' });
   } catch (error) {
     console.error(error);
@@ -234,10 +319,84 @@ router.post('/logout-all', authenticateToken, async (req, res) => {
        WHERE user_id = ? AND revoked_at IS NULL`,
       [req.user.id, req.user.id]
     );
+    clearAuthCookie(res);
     return res.json({ message: 'All sessions revoked successfully.' });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Unable to revoke sessions.' });
+  }
+});
+
+router.get('/auth/csrf', authenticateToken, async (req, res) => {
+  if (req.authTransport === 'bearer') {
+    return res.status(400).json({
+      error: 'CSRF tokens are only required for cookie-authenticated sessions.',
+      code: 'CSRF_NOT_REQUIRED'
+    });
+  }
+
+  const csrfToken = createCsrfToken();
+  try {
+    const [result] = await db.execute(
+      `UPDATE auth_tokens
+       SET csrf_token_hash = ?
+       WHERE jti = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > NOW()`,
+      [hashCsrfToken(csrfToken), req.user.jti, req.user.id]
+    );
+    if (result.affectedRows !== 1) {
+      return res.status(403).json({
+        error: 'The authenticated session is no longer active.',
+        code: 'AUTH_SESSION_INVALID'
+      });
+    }
+    setPrivateAuthResponse(res);
+    return res.json({ csrf_token: csrfToken });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: 'Unable to issue a CSRF token.',
+      code: 'CSRF_ISSUE_FAILED'
+    });
+  }
+});
+
+router.post('/logout-browser', authenticateToken, async (req, res) => {
+  if (!req.browserContextId) {
+    return res.status(400).json({
+      error: 'This session is not associated with a browser context.',
+      code: 'BROWSER_CONTEXT_NOT_AVAILABLE'
+    });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.execute(
+      `UPDATE auth_tokens
+       SET revoked_at = COALESCE(revoked_at, NOW(3)), revoked_by = ?,
+           revocation_reason = COALESCE(revocation_reason, 'BROWSER_LOGOUT')
+       WHERE browser_context_id = ? AND revoked_at IS NULL`,
+      [req.user.id, req.browserContextId]
+    );
+    await connection.execute(
+      `UPDATE browser_contexts
+       SET revoked_at = COALESCE(revoked_at, NOW(3))
+       WHERE id = ?`,
+      [req.browserContextId]
+    );
+    await connection.commit();
+    clearAuthCookie(res);
+    clearBrowserContextCookie(res);
+    return res.json({ message: 'All sessions in this browser were revoked.' });
+  } catch (error) {
+    await connection.rollback();
+    console.error(error);
+    return res.status(500).json({
+      error: 'Unable to revoke browser sessions.',
+      code: 'BROWSER_LOGOUT_FAILED'
+    });
+  } finally {
+    connection.release();
   }
 });
 

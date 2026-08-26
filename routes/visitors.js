@@ -38,7 +38,7 @@ const normalizeApprovedVisitor = (visitor) => {
 };
 
 const assignmentEligibilitySql = `(
-  approved_visitor.status = 'APPROVED'
+  approved_visitor.status IN ('ELIGIBLE', 'CHECKED_OUT')
   AND CURDATE() BETWEEN approved_visitor.valid_from AND approved_visitor.valid_until
   AND card.id IS NULL
   AND EXISTS (
@@ -52,7 +52,7 @@ const assignmentEligibilitySql = `(
 
 const approvedVisitorSelect = `
   SELECT approved_visitor.id, approved_visitor.application_id,
-         approved_visitor.visitor_profile_id,
+         approved_visitor.all_visitor_id,
          approved_visitor.application_number, approved_visitor.full_name,
          approved_visitor.company, approved_visitor.email, approved_visitor.phone,
          approved_visitor.approved_areas_of_access,
@@ -78,8 +78,8 @@ const approvedVisitorSelect = `
            AS within_valid_period,
          ${assignmentEligibilitySql} AS pass_assignment_eligible
   FROM visitors approved_visitor
-  INNER JOIN avsec_visitors profile
-    ON profile.id = approved_visitor.visitor_profile_id
+  INNER JOIN all_visitors profile
+    ON profile.id = approved_visitor.all_visitor_id
   LEFT JOIN user_profiles approver ON approver.id = approved_visitor.approved_by
   LEFT JOIN access_cards card
     ON card.current_application_id = approved_visitor.application_id`;
@@ -131,8 +131,8 @@ router.get(
       const [[count]] = await db.execute(
         `SELECT COUNT(*) AS total
          FROM visitors approved_visitor
-         INNER JOIN avsec_visitors profile
-           ON profile.id = approved_visitor.visitor_profile_id
+         INNER JOIN all_visitors profile
+           ON profile.id = approved_visitor.all_visitor_id
          LEFT JOIN access_cards card
            ON card.current_application_id = approved_visitor.application_id
          ${where}`,

@@ -1022,7 +1022,7 @@ const notificationTemplateUpdateSchema = z.object({
 const approvedVisitorListSchema = z.object({
   query: z.object({
     search: z.string().trim().max(100).default(''),
-    status: z.enum(['APPROVED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED', 'REVOKED'])
+    status: z.enum(['PENDING_VALIDITY', 'ELIGIBLE', 'CHECKED_IN', 'CHECKED_OUT'])
       .optional(),
     valid_on: isoDate.optional(),
     eligible_for_card_assignment: z.enum(['true', 'false', '1', '0']).transform(
@@ -1030,6 +1030,19 @@ const approvedVisitorListSchema = z.object({
     ).optional(),
     ...paginationQuery
   }).strict()
+});
+
+const allVisitorListSchema = z.object({
+  query: z.object({
+    search: z.string().trim().max(100).default(''),
+    security_status: z.enum(['ACTIVE', 'BLOCKED', 'FLAGGED']).optional(),
+    page: paginationQuery.page,
+    page_size: paginationQuery.page_size
+  }).strict()
+});
+
+const allVisitorIdSchema = z.object({
+  params: z.object({ id: z.string().regex(/^\d+$/).max(20) })
 });
 
 const approvedVisitorIdSchema = z.object({
@@ -1212,6 +1225,8 @@ module.exports = {
     notificationTemplateCreate: notificationTemplateCreateSchema,
     notificationTemplateUpdate: notificationTemplateUpdateSchema,
     approvedVisitorList: approvedVisitorListSchema,
+    allVisitorList: allVisitorListSchema,
+    allVisitorId: allVisitorIdSchema,
     approvedVisitorId: approvedVisitorIdSchema,
     approvedVisitorCardAssignment: approvedVisitorCardAssignmentSchema,
     approvedVisitorCardReturn: approvedVisitorCardReturnSchema,

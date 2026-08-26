@@ -40,7 +40,7 @@ router.post(
       const body = req.body;
 
       const [visitorResult] = await connection.execute(
-        `INSERT INTO avsec_visitors
+        `INSERT INTO all_visitors
          (first_name, last_name, other_names, identity_type, identity_number, issuing_country,
           date_of_birth, identity_expiry_date, company, company_position, image_url,
           gender, security_status)
@@ -65,7 +65,7 @@ router.post(
       const visitorId = visitorResult.insertId;
       const [visitorRows] = await connection.execute(
         `SELECT first_name, last_name, date_of_birth, security_status
-         FROM avsec_visitors WHERE id = ?`,
+         FROM all_visitors WHERE id = ?`,
         [visitorId]
       );
       const visitor = visitorRows[0];
@@ -140,7 +140,7 @@ router.post(
         applicationId,
         applicationNumber,
         status: 'SUBMITTED',
-        message: `Success, visitor application submitted for review.`
+        message: `Success, visitor application submitted for review. You will receive an SMS notification once the application is reviewed.`
       });
     } catch (error) {
       await connection.rollback();
@@ -192,7 +192,7 @@ router.get(
       const [countRows] = await db.execute(
         `SELECT COUNT(*) AS total
          FROM visitor_applications a
-         INNER JOIN avsec_visitors v ON v.id = a.visitor_id
+         INNER JOIN all_visitors v ON v.id = a.visitor_id
          ${whereClause}`,
         parameters
       );
@@ -236,7 +236,7 @@ router.post(
       const imageUrl = body.image_url || documents.passport_photograph_url || null;
 
       const [visitorResult] = await connection.execute(
-        `INSERT INTO avsec_visitors
+        `INSERT INTO all_visitors
          (first_name, last_name, other_names, identity_type, identity_number, issuing_country,
           date_of_birth, identity_expiry_date, company, company_position, image_url,
           gender, security_status, created_by)
@@ -262,7 +262,7 @@ router.post(
       const visitorId = visitorResult.insertId;
       const [visitorRows] = await connection.execute(
         `SELECT first_name, last_name, date_of_birth, security_status
-         FROM avsec_visitors WHERE id = ? FOR UPDATE`,
+         FROM all_visitors WHERE id = ? FOR UPDATE`,
         [visitorId]
       );
       const visitor = visitorRows[0];
@@ -467,13 +467,31 @@ router.post(
         await connection.rollback();
         return res.status(404).json({ error: 'Application not found.' });
       }
-      if (application.status !== 'APPROVED') {
+      if (application.status === 'CHECKED_IN') {
+        await connection.rollback();
+        return res.json({ status: 'CHECKED_IN', message: 'Visitor is already checked in.' });
+      }
+      if (!['APPROVED', 'CHECKED_OUT'].includes(application.status)) {
         await connection.rollback();
         return res.status(409).json({ error: `Application cannot check in from ${application.status}.` });
       }
       if (!application.within_visit_period) {
         await connection.rollback();
         return res.status(409).json({ error: 'The approved visit is outside its valid date range.' });
+      }
+
+      const [activeAssignments] = await connection.execute(
+        `SELECT id FROM card_assignments
+         WHERE application_id = ? AND status = 'ACTIVE'
+         LIMIT 1 FOR UPDATE`,
+        [application.id]
+      );
+      if (!activeAssignments[0]) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: 'Assign an access pass before checking in the visitor.',
+          code: 'ACTIVE_PASS_REQUIRED_FOR_CHECK_IN'
+        });
       }
 
       await connection.execute(
@@ -529,6 +547,10 @@ router.post(
         await connection.rollback();
         return res.status(404).json({ error: 'Application not found.' });
       }
+      if (application.status === 'CHECKED_OUT') {
+        await connection.rollback();
+        return res.json({ status: 'CHECKED_OUT', message: 'Visitor is already checked out.' });
+      }
       if (application.status !== 'CHECKED_IN') {
         await connection.rollback();
         return res.status(409).json({ error: `Application cannot check out from ${application.status}.` });
@@ -560,7 +582,7 @@ router.post(
         [application.id]
       );
       await connection.execute(
-        'UPDATE avsec_visitors SET last_visit = CURDATE() WHERE id = ?',
+        'UPDATE all_visitors SET last_visit = CURDATE() WHERE id = ?',
         [application.visitor_id]
       );
       await recordAudit(connection, {
