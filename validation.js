@@ -595,6 +595,55 @@ const passAssignmentStatisticsSchema = z.object({
   })
 });
 
+const applicantNationalityStatisticsSchema = z.object({
+  query: z.object({
+    from: isoDate,
+    to: isoDate
+  }).strict().superRefine((query, context) => {
+    const from = new Date(`${query.from}T00:00:00Z`);
+    const to = new Date(`${query.to}T00:00:00Z`);
+    const days = Math.floor((to - from) / 86400000);
+    if (days < 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['to'],
+        message: 'End date must not be before start date.'
+      });
+    } else if (days > 366) {
+      context.addIssue({
+        code: 'custom',
+        path: ['to'],
+        message: 'Statistics range cannot exceed 366 days.'
+      });
+    }
+  })
+});
+
+const repeatVisitorStatisticsSchema = z.object({
+  query: z.object({
+    from: isoDate,
+    to: isoDate,
+    limit: z.coerce.number().int().min(1).max(25).default(10)
+  }).strict().superRefine((query, context) => {
+    const from = new Date(`${query.from}T00:00:00Z`);
+    const to = new Date(`${query.to}T00:00:00Z`);
+    const days = Math.floor((to - from) / 86400000);
+    if (days < 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['to'],
+        message: 'End date must not be before start date.'
+      });
+    } else if (days > 366) {
+      context.addIssue({
+        code: 'custom',
+        path: ['to'],
+        message: 'Statistics range cannot exceed 366 days.'
+      });
+    }
+  })
+});
+
 const cardAssignmentSchema = z.object({
   params: z.object({ reference: applicationReference }),
   body: z.object({
@@ -1197,6 +1246,8 @@ module.exports = {
     notificationGroupMembers: notificationGroupMembersSchema,
     notificationGroupId: notificationGroupIdSchema,
     passAssignmentStatistics: passAssignmentStatisticsSchema,
+    applicantNationalityStatistics: applicantNationalityStatisticsSchema,
+    repeatVisitorStatistics: repeatVisitorStatisticsSchema,
     cardAssignment: cardAssignmentSchema,
     cardReturn: cardReturnSchema,
     activeCardAssignmentLookup: activeCardAssignmentLookupSchema,

@@ -32,7 +32,7 @@ const nextBucket = (date, interval) => {
 router.get(
   '/statistics/pass-assignments',
   authenticateToken,
-  authorizePermission(PERMISSIONS.VIEW_ADMIN_STATS),
+  authorizePermission(PERMISSIONS.VIEW_PASS_STATISTICS),
   validate(schemas.passAssignmentStatistics),
   async (req, res) => {
     try {
@@ -96,6 +96,124 @@ router.get(
         500,
         'PASS_ASSIGNMENT_STATISTICS_FAILED',
         'Unable to load pass assignment statistics.'
+      );
+    }
+  }
+);
+
+router.get(
+  '/statistics/applicants-by-nationality',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.VIEW_APPLICANT_STATISTICS),
+  validate(schemas.applicantNationalityStatistics),
+  async (req, res) => {
+    try {
+      const { from, to } = req.validatedQuery;
+      const [nationalities] = await db.execute(
+        `SELECT COALESCE(NULLIF(TRIM(profile.issuing_country), ''), 'UNSPECIFIED')
+                  AS nationality,
+                COUNT(DISTINCT profile.id) AS applicants,
+                COUNT(*) AS applications
+         FROM visitor_applications application
+         INNER JOIN all_visitors profile ON profile.id = application.visitor_id
+         WHERE CONVERT_TZ(application.created_at, @@session.time_zone, ?)
+                 >= CONCAT(?, ' 00:00:00')
+           AND CONVERT_TZ(application.created_at, @@session.time_zone, ?)
+                 < DATE_ADD(CONCAT(?, ' 00:00:00'), INTERVAL 1 DAY)
+         GROUP BY nationality
+         ORDER BY applicants DESC, applications DESC, nationality`,
+        [config.AIRPORT_UTC_OFFSET, from, config.AIRPORT_UTC_OFFSET, to]
+      );
+      const values = nationalities.map((item) => ({
+        nationality: item.nationality,
+        applicants: Number(item.applicants),
+        applications: Number(item.applications)
+      }));
+      return res.json({
+        nationalities: values,
+        totals: values.reduce((totals, item) => ({
+          applicants: totals.applicants + item.applicants,
+          applications: totals.applications + item.applications
+        }), { applicants: 0, applications: 0 }),
+        range: {
+          from,
+          to,
+          date_basis: 'application_created_at',
+          timezone_offset: config.AIRPORT_UTC_OFFSET
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'APPLICANT_NATIONALITY_STATISTICS_FAILED',
+        'Unable to load applicant nationality statistics.'
+      );
+    }
+  }
+);
+
+router.get(
+  '/statistics/repeat-visitors',
+  authenticateToken,
+  authorizePermission(PERMISSIONS.VIEW_APPLICANT_STATISTICS),
+  validate(schemas.repeatVisitorStatistics),
+  async (req, res) => {
+    try {
+      const { from, to, limit } = req.validatedQuery;
+      const [visitors] = await db.execute(
+        `SELECT profile.id AS all_visitor_id,
+                CONCAT_WS(' ', profile.first_name, profile.other_names, profile.last_name)
+                  AS full_name,
+                profile.company,
+                profile.issuing_country AS nationality,
+                COUNT(*) AS times_visited,
+                COUNT(DISTINCT DATE(CONVERT_TZ(visit_session.checked_in_at,
+                  @@session.time_zone, ?))) AS visit_days,
+                MAX(CONVERT_TZ(visit_session.checked_in_at, @@session.time_zone, ?))
+                  AS last_visited_at
+         FROM visit_sessions visit_session
+         INNER JOIN all_visitors profile ON profile.id = visit_session.visitor_id
+         WHERE CONVERT_TZ(visit_session.checked_in_at, @@session.time_zone, ?)
+                 >= CONCAT(?, ' 00:00:00')
+           AND CONVERT_TZ(visit_session.checked_in_at, @@session.time_zone, ?)
+                 < DATE_ADD(CONCAT(?, ' 00:00:00'), INTERVAL 1 DAY)
+         GROUP BY profile.id
+         HAVING COUNT(*) >= 2
+         ORDER BY times_visited DESC, last_visited_at DESC, full_name
+         LIMIT ?`,
+        [
+          config.AIRPORT_UTC_OFFSET,
+          config.AIRPORT_UTC_OFFSET,
+          config.AIRPORT_UTC_OFFSET,
+          from,
+          config.AIRPORT_UTC_OFFSET,
+          to,
+          limit
+        ]
+      );
+      return res.json({
+        visitors: visitors.map((visitor) => ({
+          ...visitor,
+          times_visited: Number(visitor.times_visited),
+          visit_days: Number(visitor.visit_days)
+        })),
+        range: {
+          from,
+          to,
+          date_basis: 'checked_in_at',
+          timezone_offset: config.AIRPORT_UTC_OFFSET
+        },
+        limit
+      });
+    } catch (error) {
+      console.error(error);
+      return sendError(
+        res,
+        500,
+        'REPEAT_VISITOR_STATISTICS_FAILED',
+        'Unable to load repeat visitor statistics.'
       );
     }
   }

@@ -212,7 +212,7 @@ machine-readable `code`.
 
 Creates a system user. This is not a public self-registration route.
 
-**Allowed roles:** `admin`, `super_admin`
+**Allowed roles:** all authenticated internal roles
 
 An `admin` may create roles below `admin`. Only `super_admin` may create
 `admin` or `super_admin` accounts. Role defaults to `security_assistant`,
@@ -2008,6 +2008,47 @@ using the configured airport offset, `AIRPORT_UTC_OFFSET`, which defaults to
   }
 }
 ```
+
+### `GET /api/statistics/applicants-by-nationality`
+
+Returns applicant nationality statistics for an explicit inclusive date range.
+The date basis is `visitor_applications.created_at`, converted to the configured
+airport timezone before filtering. This prevents records outside the selected
+reporting period from being included.
+
+**Allowed roles:** all authenticated internal roles
+
+```http
+GET /api/statistics/applicants-by-nationality?from=2025-08-27&to=2026-08-26
+Authorization: Bearer <session>
+```
+
+The range cannot exceed 366 days. Each nationality contains `applicants`, which
+counts unique master visitor profiles, and `applications`, which includes repeat
+applications by those people. The response also echoes `from`, `to`,
+`date_basis`, and `timezone_offset` so reports can display exactly what was
+measured.
+
+The dashboard defaults to the trailing 365-day period ending on the operator's
+current date. Users can select trailing 30, 90, 180, or 365-day periods, or enter
+custom start and end dates. Every change reloads the authoritative server data.
+
+### `GET /api/statistics/repeat-visitors`
+
+Returns the most frequent physical visitors during the selected period, based
+on `visit_sessions.checked_in_at` rather than application count.
+
+```http
+GET /api/statistics/repeat-visitors?from=2025-08-27&to=2026-08-26&limit=10
+Authorization: Bearer <session>
+```
+
+**Allowed roles:** all authenticated internal roles
+
+`limit` defaults to 10 and is capped at 25. Only visitors with at least two
+check-ins in the period are returned. Each row includes the visitor's name,
+company, nationality, `times_visited`, distinct `visit_days`, and the most recent
+check-in timestamp. Identity numbers and document details are not exposed.
 
 ## Notifications
 
