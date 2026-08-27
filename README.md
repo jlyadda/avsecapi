@@ -37,6 +37,15 @@ Browser clients must have their exact origin listed in the comma-separated
 `http://localhost:3000` for local development. Production deployments should
 set only trusted HTTPS frontend origins.
 
+For the supplied internal Nginx deployment, use:
+
+```env
+CORS_ALLOWED_ORIGINS=http://10.10.32.135
+```
+
+During development and deployment transition, multiple exact origins may be
+comma-separated. Restart the API after changing this startup configuration.
+
 Password-reset email delivery uses Gmail SMTP with an app password:
 
 ```env
